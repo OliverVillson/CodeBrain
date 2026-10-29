@@ -136,6 +136,8 @@ def test_render_cites_path_and_lines() -> None:
     head = pack.render(u, Resolution.FULL).splitlines()[0]
     assert head.startswith("### ratelimit/bucket.py:10-24 TokenBucket.consume")
     assert "changed since written" in head
+    gone = u.model_copy(update={"labels": {"tombstoned": True}})
+    assert "deleted from the repo" in pack.header(gone)
 
 
 def test_lexical_query_splits_identifiers_and_drops_stopwords() -> None:

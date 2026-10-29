@@ -33,7 +33,12 @@ def citation(unit: Unit) -> str:
 
 def header(unit: Unit) -> str:
     name = f" {unit.qualified_name}" if unit.qualified_name else ""
-    stale = " (changed since written)" if unit.validity < VALIDITY_CURRENT else ""
+    if unit.labels.get("tombstoned"):
+        stale = " (deleted from the repo)"
+    elif unit.validity < VALIDITY_CURRENT:
+        stale = " (changed since written)"
+    else:
+        stale = ""
     return f"### {citation(unit)}{name} [{unit.kind}]{stale}"
 
 
