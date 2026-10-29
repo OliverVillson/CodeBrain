@@ -8,3 +8,7 @@ build/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+eval-results/
+.venv-eval/
+vllm.log
+vllm.pid

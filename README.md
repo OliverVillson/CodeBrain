@@ -34,6 +34,7 @@ database.
 | `codebrain/server/` | §10 | MCP server with `recall(query, k, filters)`, `remember(episode)`, `explain(unit_id)`. *(next)* |
 | write-back and paging | §8, §9 | Episode distilling, duplicate merge, usage credit, and window eviction to turn units. Expected to live in `codebrain/memory/` (not created yet). *(next)* |
 | `codebrain/cli.py` | | `codebrain migrate`; other commands get added here. |
+| `codebrain/eval/` + `eval/` | plan Q1, Q2, Q4 | Evaluation harness: gold tasks mined from git history, retrieval metrics, paging vs compaction. Self-contained baseline so it runs before ingest and retrieval exist. GPU run scripts in `eval/b300/`; see `eval/README.md`. |
 
 ## Schema
 

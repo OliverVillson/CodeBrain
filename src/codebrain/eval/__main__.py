@@ -1,0 +1,363 @@
+"""``python -m codebrain.eval {retrieval,paging,all}``: run the eval and write a report."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import gc
+import json
+import platform
+import random
+import subprocess
+import sys
+import time
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from codebrain.eval import paging, retrieval
+from codebrain.eval.backends import LLM, CachedEmbedder, Embedder, FakeLLM, HashEmbedder, OpenAILLM
+from codebrain.eval.mine import Git as _Git
+from codebrain.eval.mine import GoldTask, Snapshot, assign_splits, mine_repo, snapshot, task_to_json
+from codebrain.eval.units import is_test_path
+
+DEFAULT_LLM = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+DEFAULT_EMBED = ["Qwen/Qwen3-Embedding-8B"]
+
+
+def log(msg: str) -> None:
+    print(f"[{datetime.now():%H:%M:%S}] {msg}", flush=True)
+
+
+def resolve_repo(spec: str, cache: Path) -> tuple[str, Path]:
+    """A local path is used as is; a URL is cloned once into the cache with full history."""
+    p = Path(spec).expanduser()
+    if p.exists():
+        return p.resolve().name, p.resolve()
+    name = "/".join(spec.rstrip("/").removesuffix(".git").split("/")[-2:])
+    dest = cache / name.replace("/", "__")
+    if not dest.exists():
+        log(f"cloning {spec}")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "clone", "--quiet", spec, str(dest)], check=True)
+    return name, dest
+
+
+def make_llm(args: argparse.Namespace) -> LLM:
+    if args.fake:
+        return FakeLLM()
+    return OpenAILLM(
+        args.llm_model,
+        args.llm_base_url,
+        concurrency=args.concurrency,
+        disable_thinking=not args.allow_thinking,
+        tokenizer=args.tokenizer,
+    )
+
+
+def make_embedder(name: str, args: argparse.Namespace) -> Embedder:
+    if args.fake:
+        return HashEmbedder()
+    from codebrain.eval.backends import STEmbedder
+
+    return STEmbedder(name, batch_size=args.embed_batch, trust_remote_code=args.trust_remote_code)
+
+
+def free_gpu() -> None:
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
+
+
+def fmt(x: object, ci: object = None) -> str:
+    if isinstance(x, float):
+        s = f"{x:.3f}"
+        if isinstance(ci, tuple | list):
+            s += f" ({ci[0]:.2f}–{ci[1]:.2f})"
+        return s
+    return str(x)
+
+
+async def cmd_retrieval(args: argparse.Namespace, out: Path, llm: LLM) -> dict[str, Any]:
+    t0 = time.perf_counter()
+    tasks: list[tuple[GoldTask, Snapshot]] = []
+    for spec in args.repo:
+        name, path = resolve_repo(spec, Path(args.cache).expanduser())
+        found = mine_repo(
+            path,
+            name,
+            max_tasks=args.tasks_per_repo,
+            max_scan=args.max_scan,
+            include_tests=args.include_tests,
+            seed=args.seed,
+        )
+        log(f"{name}: {len(found)} tasks mined")
+        tasks.extend(found)
+    if not tasks:
+        raise SystemExit("no usable commits found; try --max-scan higher or another repo")
+    assign_splits([t for t, _ in tasks], seed=args.seed)
+    mine_s = time.perf_counter() - t0
+    units = {u.content_hash: u for _, s in tasks for u in s.units}
+    log(f"{len(tasks)} tasks, {len(units)} distinct units across snapshots ({mine_s:.1f}s)")
+
+    variants = ["original"]
+    if not args.no_paraphrase:
+        await retrieval.paraphrase_queries(llm, [t for t, _ in tasks])
+        variants.append("paraphrase")
+
+    with (out / "goldset.jsonl").open("w") as f:
+        for t, _ in tasks:
+            f.write(json.dumps(task_to_json(t)) + "\n")
+
+    summaries: dict[str, str] | None = None
+    summary_s = 0.0
+    if not args.no_summaries:
+        log(f"summarizing {len(units)} units with {llm.name}")
+        summaries, summary_s = await retrieval.summarize_units(llm, list(units.values()))
+        log(f"summaries done in {summary_s:.1f}s ({len(units) / max(summary_s, 1e-9):.1f}/s)")
+
+    hyde_texts: dict[str, str] | None = None
+    if not args.no_hyde:
+        keys, queries = [], []
+        for t, _ in tasks:
+            for v in variants:
+                keys.append(f"{t.id}|{v}")
+                queries.append(t.query if v == "original" else (t.query_paraphrase or t.query))
+        hyde_texts = dict(zip(keys, await retrieval.hyde(llm, queries), strict=True))
+
+    per_model: dict[str, Any] = {}
+    for model in args.embed_model:
+        emb = CachedEmbedder(make_embedder(model, args))
+        log(f"embedding with {emb.name}")
+        sums = None
+        if summaries is not None:
+            sums = {h: summaries[h] for h in units}
+        results = retrieval.run_retrieval(tasks, emb, sums, hyde_texts, variants)
+        rows = retrieval.score(results, tasks, llm.count_tokens, budget=args.budget)
+        per_model[emb.name] = {
+            "rows": rows,
+            "embed_seconds": emb.seconds,
+            "embedded_texts": emb.count,
+            "embed_per_s": emb.count / max(emb.seconds, 1e-9),
+        }
+        safe = emb.name.replace("/", "__")
+        with (out / f"rankings-{safe}.jsonl").open("w") as f:
+            for r in results:
+                f.write(
+                    json.dumps(
+                        {
+                            "task": r.task_id,
+                            "variant": r.variant,
+                            "config": r.config,
+                            "top20": r.ranked[:20],
+                        }
+                    )
+                    + "\n"
+                )
+        del emb
+        free_gpu()
+
+    return {
+        "tasks": len(tasks),
+        "tasks_by_repo": {
+            r: sum(1 for t, _ in tasks if t.repo == r) for r in sorted({t.repo for t, _ in tasks})
+        },
+        "distinct_units": len(units),
+        "mean_relevant": sum(len(t.relevant) for t, _ in tasks) / len(tasks),
+        "mine_seconds": mine_s,
+        "summary_seconds": summary_s,
+        "summaries_per_s": (len(units) / summary_s) if summary_s else None,
+        "models": per_model,
+    }
+
+
+async def cmd_paging(args: argparse.Namespace, out: Path, llm: LLM) -> dict[str, Any]:
+    name, path = resolve_repo(args.repo[0], Path(args.cache).expanduser())
+    git = _Git(path)
+    try:
+        head = git.run("rev-parse", "HEAD").strip()
+        pool = [u for u in snapshot(git, head, False).units if not is_test_path(u.path)]
+    finally:
+        git.close()
+    pool = [u for u in pool if 200 <= len(u.text) <= 5000] or pool
+    log(f"paging: {len(pool)} filler units from {name}")
+    rng = random.Random(args.seed)
+    sessions = [
+        paging.build_session(
+            f"s{i}", pool, llm, rng, target_tokens=args.session_tokens, n_needles=args.needles
+        )
+        for i in range(args.sessions)
+    ]
+    emb = CachedEmbedder(make_embedder(args.embed_model[0], args))
+    t0 = time.perf_counter()
+    outs = await asyncio.gather(
+        *(
+            paging.run_session(
+                s,
+                llm,
+                emb,
+                window=args.window,
+                high=args.high_water,
+                low=args.low_water,
+                memory_budget=args.memory_budget,
+                max_context=args.max_context,
+            )
+            for s in sessions
+        )
+    )
+    secs = time.perf_counter() - t0
+    probes = [r for rs, _ in outs for r in rs]
+    with (out / "paging-probes.jsonl").open("w") as f:
+        for r in probes:
+            f.write(json.dumps(paging.probe_to_json(r)) + "\n")
+    del emb
+    free_gpu()
+    return {
+        "sessions": [st for _, st in outs],
+        "probes": len(probes),
+        "seconds": secs,
+        "embed_model": args.embed_model[0],
+        **paging.summarize_probes(probes),
+    }
+
+
+def render(meta: dict[str, Any], res: dict[str, Any]) -> str:
+    lines = [
+        "# Memory eval report",
+        "",
+        f"- Run: {meta['started']} · host {meta['host']}",
+        f"- LLM: `{meta['llm']}` · repos: {', '.join(meta['repos'])}",
+        f"- LLM tokens: {meta['llm_input_tokens']:,} in / {meta['llm_output_tokens']:,} out",
+        "",
+    ]
+    r = res.get("retrieval")
+    if r:
+        lines += [
+            "## Q1 · Retrieval",
+            "",
+            f"{r['tasks']} tasks {r['tasks_by_repo']}, {r['distinct_units']} distinct units, "
+            f"{r['mean_relevant']:.1f} relevant units per task on average. Labels are mined "
+            "automatically; see `goldset.jsonl`. Intervals are 95% bootstrap over tasks.",
+            "",
+        ]
+        for model, m in r["models"].items():
+            lines += [
+                f"### `{model}`  ·  {m['embed_per_s']:.0f} texts/s embedded",
+                "",
+                "| query | config | R@10 | R@20 | MRR | nDCG@10 | BudgetR@8k | p50 ms | p95 ms |",
+                "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+            ]
+            for row in m["rows"]:
+                lines.append(
+                    f"| {row['variant']} | {row['config']} | {fmt(row['r@10'], row['r@10_ci'])} "
+                    f"| {fmt(row['r@20'])} | {fmt(row['mrr'], row['mrr_ci'])} "
+                    f"| {fmt(row['ndcg@10'])} | {fmt(row['br'])} "
+                    f"| {row['p50_ms']:.1f} | {row['p95_ms']:.1f} |"
+                )
+            lines.append("")
+        if r.get("summaries_per_s"):
+            lines += [f"Summaries: {r['summaries_per_s']:.1f} units/s.", ""]
+    p = res.get("paging")
+    if p:
+        arms = list(p["overall"])
+        lines += [
+            "## Q2 · Paging vs compaction",
+            "",
+            f"{len(p['sessions'])} sessions, {p['probes']} probes, {p['seconds']:.0f}s. "
+            f"Mean session {sum(s['tokens'] for s in p['sessions']) / len(p['sessions']):,.0f}"
+            " tokens.",
+            "",
+            "| | " + " | ".join(arms) + " |",
+            "| --- | " + " | ".join("---" for _ in arms) + " |",
+            "| accuracy | "
+            + " | ".join(f"{p['overall'][a]['acc']:.3f} (n={p['overall'][a]['n']})" for a in arms)
+            + " |",
+            "| prompt tokens per probe | "
+            + " | ".join(f"{p['overall'][a]['tokens']:,.0f}" for a in arms)
+            + " |",
+        ]
+        for group in ("by_kind", "by_distance"):
+            for k, by_arm in p[group].items():
+                cells = [f"{by_arm[a]['acc']:.2f}" if by_arm[a]["n"] else "–" for a in arms]
+                label = k if group == "by_kind" else f"Δ {k} turns"
+                lines.append(f"| {label} | " + " | ".join(cells) + " |")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(prog="python -m codebrain.eval")
+    ap.add_argument("command", choices=["retrieval", "paging", "all"])
+    ap.add_argument("--repo", action="append", required=True, help="git URL or local path")
+    ap.add_argument("--out", default="eval-results", help="results directory")
+    ap.add_argument("--cache", default="~/.cache/codebrain-eval/repos")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--fake", action="store_true", help="fake models, for smoke tests")
+    g = ap.add_argument_group("models")
+    g.add_argument("--llm-model", default=DEFAULT_LLM)
+    g.add_argument("--llm-base-url", default="http://localhost:8000/v1")
+    g.add_argument("--tokenizer", default=None, help="HF tokenizer for counting, default model")
+    g.add_argument("--allow-thinking", action="store_true")
+    g.add_argument("--concurrency", type=int, default=256)
+    g.add_argument("--embed-model", action="append", default=None, help="repeat to compare")
+    g.add_argument("--embed-batch", type=int, default=64)
+    g.add_argument("--trust-remote-code", action="store_true")
+    g = ap.add_argument_group("retrieval (Q1)")
+    g.add_argument("--tasks-per-repo", type=int, default=20)
+    g.add_argument("--max-scan", type=int, default=3000)
+    g.add_argument("--include-tests", action="store_true")
+    g.add_argument("--budget", type=int, default=8000)
+    g.add_argument("--no-summaries", action="store_true")
+    g.add_argument("--no-hyde", action="store_true")
+    g.add_argument("--no-paraphrase", action="store_true")
+    g = ap.add_argument_group("paging (Q2)")
+    g.add_argument("--sessions", type=int, default=10)
+    g.add_argument("--needles", type=int, default=20)
+    g.add_argument("--session-tokens", type=int, default=100_000)
+    g.add_argument("--window", type=int, default=16_000)
+    g.add_argument("--high-water", type=float, default=0.70)
+    g.add_argument("--low-water", type=float, default=0.50)
+    g.add_argument("--memory-budget", type=int, default=2_000)
+    g.add_argument("--max-context", type=int, default=131_072)
+    return ap
+
+
+async def amain(args: argparse.Namespace) -> int:
+    args.embed_model = args.embed_model or DEFAULT_EMBED
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    out = Path(args.out) / stamp
+    out.mkdir(parents=True, exist_ok=True)
+    llm = make_llm(args)
+    meta: dict[str, Any] = {
+        "started": stamp,
+        "host": platform.node(),
+        "llm": llm.name,
+        "repos": args.repo,
+        "argv": sys.argv[1:],
+    }
+    res: dict[str, Any] = {}
+    if args.command in ("retrieval", "all"):
+        res["retrieval"] = await cmd_retrieval(args, out, llm)
+    if args.command in ("paging", "all"):
+        res["paging"] = await cmd_paging(args, out, llm)
+    meta["llm_input_tokens"] = llm.input_tokens
+    meta["llm_output_tokens"] = llm.output_tokens
+    (out / "results.json").write_text(json.dumps({"meta": meta, **res}, indent=2, default=str))
+    report = render(meta, res)
+    (out / "report.md").write_text(report)
+    print("\n" + report)
+    log(f"wrote {out}")
+    return 0
+
+
+def main() -> int:
+    return asyncio.run(amain(parser().parse_args()))
+
+
+if __name__ == "__main__":
+    sys.exit(main())
