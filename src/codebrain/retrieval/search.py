@@ -31,6 +31,9 @@ class Filters(BaseModel):
     """
 
     repo: str | None = None
+    path_prefix: str | None = None
+    capabilities: list[str] = Field(default_factory=list)
+    """Match units tagged with at least one of these."""
     languages: list[str] = Field(default_factory=list)
     kinds: list[UnitKind] = Field(default_factory=list)
     layers: list[Layer] = Field(default_factory=list)
@@ -48,6 +51,12 @@ class Filters(BaseModel):
         if self.repo is not None:
             parts.append(sql.SQL("u.repo = %(f_repo)s"))
             params["f_repo"] = self.repo
+        if self.path_prefix is not None:
+            parts.append(sql.SQL("starts_with(u.path, %(f_path)s)"))
+            params["f_path"] = self.path_prefix
+        if self.capabilities:
+            parts.append(sql.SQL("u.capabilities && %(f_caps)s::text[]"))
+            params["f_caps"] = self.capabilities
         for col, values in (
             ("language", self.languages),
             ("kind", [str(k) for k in self.kinds]),

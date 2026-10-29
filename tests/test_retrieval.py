@@ -261,6 +261,9 @@ def test_filters_and_session_scope(conn: psycopg.Connection, corpus: dict[str, U
     assert turn.id in ids(Filters(session_id="s1"))
     assert ids(Filters(kinds=[UnitKind.EPISODE])) == ["webhook", "redis"]
     assert "redis" not in ids(Filters(min_validity=0.5))
+    assert ids(Filters(path_prefix="ratelimit/")) == ["bucket"]
+    repo.upsert_unit(conn, corpus["retry"].model_copy(update={"capabilities": ["resilience"]}))
+    assert ids(Filters(capabilities=["resilience", "caching"])) == ["retry"]
     ex = broker.explain(QUERY, turn.id, filters=Filters(session_id="s1"))
     assert ex.breakdown is not None and ex.breakdown.namespace_weight == pytest.approx(1.2)
 
