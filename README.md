@@ -43,7 +43,7 @@ The MCP server runs over stdio and exposes five tools:
 | --- | --- | --- |
 | `recall(query, k, token_budget, filters, session_id)` | §7 | Ranked units packed to the token budget, each at `full`, `summary` or `signature` resolution, with path and line span. Every result is logged for usage credit. |
 | `remember(episode)` | §8 | Writes a finished task back as an `episode` or `decision` unit, credits `used_unit_ids`, links `touched_unit_ids` with `produced_by` edges, merges near-duplicates. |
-| `explain(unit_id)` | §6 | One unit in full, its graph neighbours both ways, Q(u), and the episode evidence behind it. |
+| `explain(unit_id, query)` | §6, §7 | One unit in full, its graph neighbours both ways, Q(u), and the episode evidence behind it. With `query`, also how it scores for that recall. |
 | `ingest(repo, path, paths, force)` | §3 | Indexes a local checkout and returns a job. |
 | `status(job_id)` | | Units by kind, repos, episode count, ingest jobs. |
 

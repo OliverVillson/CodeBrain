@@ -90,14 +90,19 @@ def build_server(backend: MemoryBackend) -> MCPServer:
 
     @server.tool(
         description="Show one unit in full with its graph neighbours (calls, imports, tests, "
-        "the episode that produced it) and its usage history.",
+        "the episode that produced it) and its usage history. Pass the recall query to "
+        "see why it ranked where it did.",
         annotations=READ_ONLY,
     )
     async def explain(
         unit_id: Annotated[str, Field(min_length=1, description="A unit id from recall.")],
+        query: Annotated[
+            str | None,
+            Field(description="Also show how this unit scores for this recall query."),
+        ] = None,
     ) -> ExplainResult:
         try:
-            return await anyio.to_thread.run_sync(backend.explain, unit_id)
+            return await anyio.to_thread.run_sync(backend.explain, unit_id, query)
         except UnknownUnitError:
             raise ToolError(f"no unit with id {unit_id!r}") from None
 

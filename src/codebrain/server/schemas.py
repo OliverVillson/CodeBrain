@@ -146,6 +146,12 @@ class LinkedUnit(BaseModel):
 class ExplainResult(BaseModel):
     unit: Unit
     quality: float = Field(description="Q(u) = (used + 1) / (retrieved + 2).")
+    query: str | None = None
+    trace: dict[str, Any] | None = Field(
+        default=None,
+        description="How this unit scores for ``query``: stage-2 features and the final "
+        "score. Only set when a query was given.",
+    )
     outgoing: list[LinkedUnit] = Field(default_factory=list)
     incoming: list[LinkedUnit] = Field(default_factory=list)
     episode: Episode | None = None

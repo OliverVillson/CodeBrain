@@ -99,11 +99,10 @@ class InMemoryBackend:
             for u in self.units.values():
                 if not _matches(u, request.filters):
                     continue
-                lexical = len(q & _unit_terms(u)) / len(q) if q else 0.0
-                if lexical == 0:
+                features = _score(q, u)
+                if features["lexical"] == 0:
                     continue
-                features = {"lexical": lexical, "quality": u.quality, "validity": u.validity}
-                score = (0.7 * lexical + 0.3 * u.quality) * u.validity
+                score = features.pop("score")
                 scored.append((score, features, u))
             scored.sort(key=lambda t: (-t[0], t[2].id))
 
@@ -230,7 +229,7 @@ class InMemoryBackend:
 
     # explain
 
-    def explain(self, unit_id: str) -> ExplainResult:
+    def explain(self, unit_id: str, query: str | None = None) -> ExplainResult:
         with self._lock:
             unit = self.units.get(unit_id)
             if unit is None:
@@ -251,6 +250,8 @@ class InMemoryBackend:
                 outgoing=outgoing,
                 incoming=incoming,
                 episode=self.episodes.get(unit_id),
+                query=query,
+                trace=_score(terms(query), unit) if query else None,
             )
 
     def _linked(self, edge: Edge, other_id: str) -> LinkedUnit:
@@ -374,6 +375,12 @@ class InMemoryBackend:
 def _unit_terms(u: Unit) -> set[str]:
     parts = [u.text, u.summary, u.signature, u.qualified_name, u.path, u.lexical_terms]
     return terms(" ".join(p for p in parts if p)) | {c.lower() for c in u.capabilities}
+
+
+def _score(q: set[str], u: Unit) -> dict[str, float]:
+    lexical = len(q & _unit_terms(u)) / len(q) if q else 0.0
+    score = (0.7 * lexical + 0.3 * u.quality) * u.validity
+    return {"lexical": lexical, "quality": u.quality, "validity": u.validity, "score": score}
 
 
 def _matches(u: Unit, f: RecallFilters) -> bool:

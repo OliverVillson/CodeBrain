@@ -48,8 +48,11 @@ class MemoryBackend(Protocol):
         """Store a finished task as an experience unit and credit what helped (sketch §8)."""
         ...
 
-    def explain(self, unit_id: str) -> ExplainResult:
-        """Return a unit with its graph neighbours and evidence. Raises ``UnknownUnitError``."""
+    def explain(self, unit_id: str, query: str | None = None) -> ExplainResult:
+        """Return a unit with its graph neighbours and evidence. Raises ``UnknownUnitError``.
+
+        With ``query``, also fill ``trace`` with how the unit scores for that query.
+        """
         ...
 
     def ingest(self, request: IngestRequest) -> IngestJob:

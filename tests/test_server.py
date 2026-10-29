@@ -237,6 +237,11 @@ def test_explain_shows_neighbours(backend: InMemoryBackend) -> None:
                 "summary": "Retry a call with exponential backoff.",
             }
         ]
+        assert out["query"] is None and out["trace"] is None
+        traced = await call(c, "explain", {"unit_id": bucket, "query": "token bucket"})
+        assert traced["query"] == "token bucket"
+        assert traced["trace"]["lexical"] == 1.0
+        assert traced["trace"]["score"] > 0
         assert "no unit" in await call_error(c, "explain", {"unit_id": "u_nope"})
 
     run(backend, body)
