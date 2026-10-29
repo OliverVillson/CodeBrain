@@ -31,9 +31,39 @@ database.
 | `codebrain/store/` | §2, §6, §10 | Postgres + pgvector. `migrations/` (SQL), `migrate.py` (runner), `db.py` (connections), `repo.py` (basic reads and writes shared by every writer). |
 | `codebrain/ingest/` | §3, §4, §5 | Repo to units: tree-sitter parse, AST chunking within τ bounds, AST hashing, LLM summaries, embeddings, layer and capability classification, call/import/contains edges. *(next)* |
 | `codebrain/retrieval/` | §6, §7 | The context broker: hybrid search over the three views, RRF, personalized PageRank, stage-2 scoring, MMR, knapsack packing. *(next)* |
-| `codebrain/server/` | §10 | MCP server with `recall(query, k, filters)`, `remember(episode)`, `explain(unit_id)`. *(next)* |
+| `codebrain/server/` | §10 | MCP server (stdio) with `recall`, `remember`, `explain`, `ingest`, `status`. `schemas.py` (tool inputs and outputs), `backend.py` (the `MemoryBackend` protocol the tools call), `memory.py` (in-memory fake), `app.py` (tools). See [Connecting an agent](#connecting-an-agent). |
 | write-back and paging | §8, §9 | Episode distilling, duplicate merge, usage credit, and window eviction to turn units. Expected to live in `codebrain/memory/` (not created yet). *(next)* |
 | `codebrain/cli.py` | | `codebrain migrate`; other commands get added here. |
+
+## Connecting an agent
+
+The MCP server runs over stdio and exposes five tools:
+
+| Tool | Sketch | What it does |
+| --- | --- | --- |
+| `recall(query, k, token_budget, filters, session_id)` | §7 | Ranked units packed to the token budget, each at `full`, `summary` or `signature` resolution, with path and line span. Every result is logged for usage credit. |
+| `remember(episode)` | §8 | Writes a finished task back as an `episode` or `decision` unit, credits `used_unit_ids`, links `touched_unit_ids` with `produced_by` edges, merges near-duplicates. |
+| `explain(unit_id)` | §6 | One unit in full, its graph neighbours both ways, Q(u), and the episode evidence behind it. |
+| `ingest(repo, path, paths, force)` | §3 | Indexes a local checkout and returns a job. |
+| `status(job_id)` | | Units by kind, repos, episode count, ingest jobs. |
+
+For Claude Code, copy [`examples/claude-code.mcp.json`](examples/claude-code.mcp.json) to
+`.mcp.json` in the project you want the agent to remember, and set `/path/to/CodeBrain`
+to this checkout. Or add it from the command line:
+
+```sh
+claude mcp add codebrain -- uv run --directory /path/to/CodeBrain python -m codebrain.server
+```
+
+Then run `/mcp` in Claude Code to check that `codebrain` is connected. The server's
+instructions tell the agent to `recall` before building and `remember` when done.
+
+`--backend` picks what the tools talk to. The only built-in one today is `memory`, an
+in-process fake that keeps everything in RAM until the server exits: enough to try the
+tools and to test against, with term-overlap ranking and one unit per file on ingest.
+The Postgres backend (retrieval, ingest and write-back behind the same `MemoryBackend`
+protocol) will be selectable here once those modules land; any `module:factory` that
+returns a `MemoryBackend` works in the meantime.
 
 ## Schema
 
