@@ -66,10 +66,13 @@ from codebrain.retrieval import ContextBroker, Filters
 from codebrain.models import VectorView
 
 broker = ContextBroker(conn, {VectorView.SUMMARY: text_embedder, VectorView.CODE: code_embedder})
-result = broker.recall("Create a rate limiter for the public API", budget=4000,
-                       filters=Filters(repo="demo", session_id="s1"))
-print(result.render())                      # cited context block, packed to the budget
-broker.explain(result.query, "u_...", budget=4000)   # per-feature score breakdown and stage trace
+result = broker.recall(
+    "Create a rate limiter for the public API",
+    budget=4000,
+    filters=Filters(repo="demo", session_id="s1"),
+)
+print(result.render())  # cited context block, packed to the budget
+broker.explain(result.query, "u_...", budget=4000)  # per-feature score breakdown and stage trace
 ```
 
 An embedder is anything with a `model` id and `embed(texts) -> list[list[float]]`; it
