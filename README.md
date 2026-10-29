@@ -30,7 +30,7 @@ database.
 | `codebrain/config.py` | all | `Settings` (env prefix `CODEBRAIN_`) and every tunable constant from the sketch, grouped by section. |
 | `codebrain/store/` | §2, §6, §10 | Postgres + pgvector. `migrations/` (SQL), `migrate.py` (runner), `db.py` (connections), `repo.py` (basic reads and writes shared by every writer). |
 | `codebrain/ingest/` | §3, §4, §5 | Repo to units: tree-sitter parse, AST chunking within τ bounds, AST hashing, LLM summaries, embeddings, layer and capability classification, call/import/contains edges. *(next)* |
-| `codebrain/retrieval/` | §6, §7 | The context broker: hybrid search over the three views, RRF, personalized PageRank, stage-2 scoring, MMR, knapsack packing. *(next)* |
+| `codebrain/retrieval/` | §6, §7 | The context broker. `ContextBroker(conn, encoders).recall(query, budget)` and `.explain(query, unit_id)`. Modules: `search` (three indexes, `Filters`), `fusion` (RRF), `graph` (personalized PageRank), `scoring` (S(u\|q) and `ScoreBreakdown`), `mmr`, `pack` (resolution knapsack and rendering), `encoders` (the `Embedder` protocol for query vectors). |
 | `codebrain/server/` | §10 | MCP server with `recall(query, k, filters)`, `remember(episode)`, `explain(unit_id)`. *(next)* |
 | write-back and paging | §8, §9 | Episode distilling, duplicate merge, usage credit, and window eviction to turn units. Expected to live in `codebrain/memory/` (not created yet). *(next)* |
 | `codebrain/cli.py` | | `codebrain migrate`; other commands get added here. |
@@ -58,6 +58,24 @@ Defined in `src/codebrain/store/migrations/0001_init.sql`.
   `store/repo.py`. Search queries live in `retrieval/`, not in `store/`.
 - CI runs ruff, `ruff format --check`, mypy (strict) and pytest against
   `pgvector/pgvector:pg16`.
+
+## Recall
+
+```python
+from codebrain.retrieval import ContextBroker, Filters
+from codebrain.models import VectorView
+
+broker = ContextBroker(conn, {VectorView.SUMMARY: text_embedder, VectorView.CODE: code_embedder})
+result = broker.recall("Create a rate limiter for the public API", budget=4000,
+                       filters=Filters(repo="demo", session_id="s1"))
+print(result.render())                      # cited context block, packed to the budget
+broker.explain(result.query, "u_...", budget=4000)   # per-feature score breakdown and stage trace
+```
+
+An embedder is anything with a `model` id and `embed(texts) -> list[list[float]]`; it
+must be the model ingest used for that view. Views without one are skipped, so
+`ContextBroker(conn)` gives lexical plus graph recall. `recall` logs what it returns to
+`retrievals` (pass `log=False` to skip) inside the caller's transaction.
 
 ## Open decisions
 

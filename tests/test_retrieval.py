@@ -1,0 +1,317 @@
+"""Recall and explain end to end against Postgres + pgvector.
+
+The corpus mirrors the sketch's worked example: "Create a rate limiter for the
+public API" over a token bucket, two past episodes (one whose code was deleted),
+an unrelated retry helper, and middleware that only the code graph connects.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+
+import psycopg
+import pytest
+
+from codebrain.config import Settings
+from codebrain.models import (
+    Edge,
+    EdgeType,
+    Namespace,
+    Resolution,
+    Span,
+    Unit,
+    UnitKind,
+    UnitVector,
+    VectorView,
+)
+from codebrain.retrieval import ContextBroker, Filters
+from codebrain.store import repo
+from tests.fakes import HashEmbedder
+
+NOW = datetime(2026, 10, 29, 12, tzinfo=UTC)
+QUERY = "Create a rate limiter for the public API"
+TEXT = HashEmbedder("text-test")
+CODE = HashEmbedder("code-test")
+
+
+def _code(uid: str, path: str, name: str, summary: str, terms: str, **kw: object) -> Unit:
+    data: dict[str, object] = dict(
+        id=uid,
+        kind=UnitKind.FUNCTION,
+        repo="demo",
+        path=path,
+        qualified_name=name,
+        language="python",
+        span=Span(start_line=10, end_line=24),
+        text=f"def {name.split('.')[-1]}(...):\n" + "    ...\n" * 40,
+        summary=summary,
+        signature=f"def {name.split('.')[-1]}(...)",
+        lexical_terms=terms,
+        tokens=200,
+        updated_at=NOW,
+        created_at=NOW,
+    )
+    data.update(kw)
+    return Unit.model_validate(data)
+
+
+def _episode(uid: str, summary: str, **kw: object) -> Unit:
+    data: dict[str, object] = dict(
+        id=uid,
+        kind=UnitKind.EPISODE,
+        namespace=Namespace.PROJECT,
+        repo="demo",
+        text=summary + "\n" + "Steps and pitfalls. " * 30,
+        summary=summary,
+        lexical_terms=summary.lower(),
+        tokens=180,
+        updated_at=NOW - timedelta(days=7),
+        created_at=NOW - timedelta(days=7),
+    )
+    data.update(kw)
+    return Unit.model_validate(data)
+
+
+def _store(conn: psycopg.Connection, unit: Unit, *, vectors: bool = True) -> Unit:
+    repo.upsert_unit(conn, unit)
+    if vectors:
+        for view, enc, text in (
+            (VectorView.SUMMARY, TEXT, unit.summary or unit.text),
+            (VectorView.CODE, CODE, f"{unit.lexical_terms or ''} {unit.text}"),
+        ):
+            repo.upsert_vector(
+                conn,
+                UnitVector(
+                    unit_id=unit.id, view=view, model=enc.model, embedding=enc.embed([text])[0]
+                ),
+            )
+    return unit
+
+
+@pytest.fixture
+def corpus(conn: psycopg.Connection) -> dict[str, Unit]:
+    units = {
+        "bucket": _store(
+            conn,
+            _code(
+                "bucket",
+                "ratelimit/bucket.py",
+                "TokenBucket.consume",
+                "Rate limit API requests with a token bucket; refuse when empty.",
+                "token bucket consume rate limit",
+                retrieved_count=3,
+                used_count=3,
+            ),
+        ),
+        "retry": _store(
+            conn,
+            _code(
+                "retry",
+                "net/retry.py",
+                "retry_with_backoff",
+                "Retry a failing call with exponential backoff.",
+                "retry with backoff",
+            ),
+        ),
+        "config": _store(
+            conn,
+            _code(
+                "config",
+                "app/config.py",
+                "load_config",
+                "Load the YAML settings file.",
+                "load config yaml",
+            ),
+        ),
+        "webhook": _store(
+            conn,
+            _episode("webhook", "Episode: throttled outgoing webhooks per tenant with a limiter."),
+        ),
+        "redis": _store(
+            conn,
+            _episode(
+                "redis",
+                "Episode: Redis INCR rate limiter for the public API.",
+                validity=0.3,
+                updated_at=NOW - timedelta(days=120),
+            ),
+        ),
+        # Only reachable through the graph: no vectors, no shared terms.
+        "middleware": _store(
+            conn,
+            _code(
+                "middleware",
+                "web/middleware.py",
+                "quota_middleware",
+                "Wrap each handler and answer 429 once over quota.",
+                "quota middleware",
+            ),
+            vectors=False,
+        ),
+    }
+    repo.add_edges(
+        conn,
+        [
+            Edge(src_id="middleware", dst_id="bucket", type=EdgeType.CALLS),
+            Edge(src_id="bucket", dst_id="webhook", type=EdgeType.PRODUCED_BY),
+        ],
+    )
+    return units
+
+
+def _broker(conn: psycopg.Connection, settings: Settings | None = None) -> ContextBroker:
+    encoders = {VectorView.SUMMARY: TEXT, VectorView.CODE: CODE}
+    return ContextBroker(conn, encoders, settings=settings or Settings(), clock=lambda: NOW)
+
+
+@pytest.mark.db
+def test_recall_ranks_live_code_over_tombstoned_episode(
+    conn: psycopg.Connection, corpus: dict[str, Unit]
+) -> None:
+    result = _broker(conn).recall(QUERY, 10_000, log=False)
+    ids = [u.unit.id for u in result.units]
+    assert ids[0] == "bucket"
+    assert ids.index("redis") > ids.index("webhook")
+    top = result.units[0]
+    assert top.citation == "ratelimit/bucket.py:10-24"
+    assert top.text.startswith("### ratelimit/bucket.py:10-24 TokenBucket.consume")
+    assert result.tokens_used <= result.budget
+    assert "### ratelimit/bucket.py:10-24" in result.render()
+
+
+@pytest.mark.db
+def test_explain_breaks_down_validity(conn: psycopg.Connection, corpus: dict[str, Unit]) -> None:
+    ex = _broker(conn).explain(QUERY, "redis", budget=10_000)
+    assert ex.found and ex.candidate and ex.selected
+    b = ex.breakdown
+    assert b is not None
+    assert set(ex.index_ranks) == {"semantic", "code", "lexical"}
+    assert b.validity == pytest.approx(0.3)
+    assert b.score == pytest.approx(0.3 * b.relevance)
+    assert b.semantic > 0.5  # semantically the closest unit, pulled down by validity
+    assert sum(b.contributions.values()) == pytest.approx(b.relevance)
+
+
+@pytest.mark.db
+def test_deprecated_units_are_not_returned(
+    conn: psycopg.Connection, corpus: dict[str, Unit]
+) -> None:
+    repo.upsert_unit(conn, corpus["redis"].model_copy(update={"validity": 0.0}))
+    broker = _broker(conn)
+    assert "redis" not in [u.unit.id for u in broker.recall(QUERY, 10_000, log=False).units]
+    ex = broker.explain(QUERY, "redis", budget=10_000)
+    assert ex.candidate and ex.breakdown is not None and ex.breakdown.score == 0
+    assert ex.mmr_rank is None and ex.selected is False
+
+
+@pytest.mark.db
+def test_graph_expansion_pulls_in_callers(
+    conn: psycopg.Connection, corpus: dict[str, Unit]
+) -> None:
+    broker = _broker(conn)
+    ex = broker.explain(QUERY, "middleware", budget=10_000)
+    assert ex.candidate and ex.graph_expanded and ex.index_ranks == {}
+    assert ex.breakdown is not None and ex.breakdown.graph > 0
+    assert ex.breakdown.semantic == 0 and ex.breakdown.lexical == 0
+    assert "middleware" in [u.unit.id for u in broker.recall(QUERY, 10_000, log=False).units]
+
+
+@pytest.mark.db
+def test_small_budget_drops_resolution(conn: psycopg.Connection, corpus: dict[str, Unit]) -> None:
+    broker = _broker(conn)
+    roomy = broker.recall(QUERY, 10_000, log=False)
+    assert {u.resolution for u in roomy.units} == {Resolution.FULL}
+    tight = broker.recall(QUERY, 120, log=False)
+    assert 0 < tight.tokens_used <= 120
+    assert Resolution.FULL not in {u.resolution for u in tight.units}
+    assert broker.recall(QUERY, 10_000, k=2, log=False).units[1:] != []
+    assert len(broker.recall(QUERY, 10_000, k=2, log=False).units) == 2
+
+
+@pytest.mark.db
+def test_filters_and_session_scope(conn: psycopg.Connection, corpus: dict[str, Unit]) -> None:
+    _store(
+        conn,
+        _code(
+            "other", "x.py", "rate_limit", "Rate limit the public API.", "rate limit", repo="other"
+        ),
+    )
+    turn = _store(
+        conn,
+        Unit(
+            id="turn",
+            kind=UnitKind.TURN,
+            namespace=Namespace.SESSION,
+            session_id="s1",
+            text="User wants the public API rate limiter to allow bursts.",
+            summary="User wants the public API rate limiter to allow bursts.",
+            lexical_terms="public api rate limiter bursts",
+            updated_at=NOW,
+        ),
+    )
+    broker = _broker(conn)
+
+    def ids(f: Filters) -> list[str]:
+        return [u.unit.id for u in broker.recall(QUERY, 10_000, filters=f, log=False).units]
+
+    assert "other" in ids(Filters())
+    assert "other" not in ids(Filters(repo="demo"))
+    assert turn.id not in ids(Filters())
+    assert turn.id not in ids(Filters(session_id="s2"))
+    assert turn.id in ids(Filters(session_id="s1"))
+    assert ids(Filters(kinds=[UnitKind.EPISODE])) == ["webhook", "redis"]
+    assert "redis" not in ids(Filters(min_validity=0.5))
+    ex = broker.explain(QUERY, turn.id, filters=Filters(session_id="s1"))
+    assert ex.breakdown is not None and ex.breakdown.namespace_weight == pytest.approx(1.2)
+
+
+@pytest.mark.db
+def test_recall_logs_retrievals(conn: psycopg.Connection, corpus: dict[str, Unit]) -> None:
+    result = _broker(conn).recall(QUERY, 10_000, filters=Filters(session_id="s1"))
+    got = repo.get_unit(conn, "bucket")
+    assert got is not None and got.retrieved_count == 4
+    rows = conn.execute(
+        "SELECT unit_id, rank, session_id, features FROM retrievals ORDER BY rank"
+    ).fetchall()
+    assert [r[0] for r in rows] == [u.unit.id for u in result.units]
+    assert rows[0][1] == 1 and rows[0][2] == "s1"
+    assert set(rows[0][3]) >= {"semantic", "code", "lexical", "graph", "quality", "freshness"}
+
+
+@pytest.mark.db
+def test_explain_scores_units_outside_the_candidates(
+    conn: psycopg.Connection, corpus: dict[str, Unit]
+) -> None:
+    settings = Settings()
+    settings.retrieval.k_per_index = 1
+    settings.graph.expand_keep = 0
+    ex = _broker(conn, settings).explain(QUERY, "config", budget=10_000)
+    assert ex.found and not ex.candidate and ex.index_ranks == {}
+    assert ex.breakdown is not None and ex.breakdown.score > 0
+    assert ex.selected is False
+    missing = _broker(conn).explain(QUERY, "no-such-unit")
+    assert not missing.found and missing.breakdown is None
+
+
+@pytest.mark.db
+def test_mmr_spreads_near_duplicates(conn: psycopg.Connection, corpus: dict[str, Unit]) -> None:
+    dup = corpus["bucket"].model_copy(
+        update={
+            "id": "bucket_copy",
+            "path": "vendor/bucket.py",
+            "retrieved_count": 0,
+            "used_count": 0,
+        }
+    )
+    _store(conn, dup)
+    ranked = [u.unit.id for u in _broker(conn).recall(QUERY, 10_000, log=False).units]
+    assert ranked[0] == "bucket"
+    assert ranked.index("bucket_copy") > 1
+
+
+@pytest.mark.db
+def test_lexical_only_without_encoders(conn: psycopg.Connection, corpus: dict[str, Unit]) -> None:
+    broker = ContextBroker(conn, {}, settings=Settings(), clock=lambda: NOW)
+    result = broker.recall("token bucket", 10_000, log=False)
+    assert result.units[0].unit.id == "bucket"
+    assert result.units[0].breakdown.semantic == 0
