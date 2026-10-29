@@ -72,6 +72,8 @@ class WriteBackParams(BaseModel):
     """Sketch §8."""
 
     dup_threshold: float = 0.92
+    min_reference_length: int = 3
+    """Shortest identifier that counts as a call or import of a recalled unit in a diff."""
 
 
 class PagingParams(BaseModel):
@@ -81,6 +83,10 @@ class PagingParams(BaseModel):
     low_water: float = 0.50
     session_weight: float = 1.2
     session_half_life_hours: float = 2.0
+    keep_recent_turns: int = 2
+    """Turns at the end of the window that are never evicted, however full it is."""
+    turn_unit_max_tokens: int = 1200
+    """Evicted turns are grouped into turn units of at most this size (τ_max, §3)."""
 
 
 class Settings(BaseSettings):
