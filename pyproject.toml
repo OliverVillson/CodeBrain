@@ -1,0 +1,54 @@
+[project]
+name = "codebrain"
+version = "0.1.0"
+description = "A memory layer for coding agents: page context out to a vector store instead of compacting it."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+dependencies = [
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "psycopg[binary,pool]>=3.2",
+    "pgvector>=0.3",
+    "numpy>=1.26",
+    # ingest
+    "tree-sitter>=0.23",
+    "tree-sitter-language-pack>=0.6",
+    # server
+    "mcp>=1.2",
+]
+
+[project.scripts]
+codebrain = "codebrain.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/codebrain"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "db: needs a Postgres with pgvector at CODEBRAIN_DATABASE_URL (skipped otherwise)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+plugins = ["pydantic.mypy"]
