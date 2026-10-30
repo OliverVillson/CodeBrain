@@ -1,16 +1,44 @@
 {
   "codebase": "tidepool",
-  "description": "Ten questions about eval/fixtures/tidepool, a fictional job queue written for this benchmark so no model has seen it in training. Each answer needs facts from one or more files; several have a look-alike distractor elsewhere in the code. An answer is correct when every fact matches (any one pattern per fact, case-insensitive regex).",
+  "description": "100 questions: 40 about eval/fixtures/tidepool, a fictional job queue written for this benchmark so no model has seen it in training, and 20 each about the rq, huey and arq source that --qa-haystack mixes into the codebase (questions with a \"package\" other than tidepool are only asked when that haystack is in). Answers come from the pinned source. Each answer needs facts from one or more files; several have a look-alike distractor elsewhere in the code. An answer is correct when every fact matches (any one pattern per fact, case-insensitive regex).",
   "questions": [
     {
       "id": "q01-backoff",
       "question": "When a job handler raises an ordinary exception, how is the delay before the next attempt computed, and what are the default minimum and maximum delays?",
       "answer": "Decorrelated jitter in tidepool/retry.py: each delay is drawn uniformly between backoff_base and 3x the previous delay, then capped: min(cap, uniform(base, 3 * prev)). Defaults are backoff_base = 2 s and backoff_cap = 900 s (15 minutes). (The 1/5/25 s schedule in webhooks.py is for webhook delivery, not jobs.)",
       "facts": [
-        {"label": "random/jitter between base and 3x previous", "any": ["decorrelated", "jitter", "uniform"]},
-        {"label": "3x multiplier", "any": ["\\b3\\s*(x|\\*|×|times)", "three times", "JITTER_MULTIPLIER", "(x|\\*|×)\\s*3\\b"]},
-        {"label": "base 2 s", "any": ["\\b2(\\.0)?\\s*(s\\b|sec|second)", "backoff_base\\D{0,20}2\\b", "base\\D{0,15}2(\\.0)?\\b"]},
-        {"label": "cap 900 s", "any": ["\\b900\\b", "15 ?min"]}
+        {
+          "label": "random/jitter between base and 3x previous",
+          "any": [
+            "decorrelated",
+            "jitter",
+            "uniform"
+          ]
+        },
+        {
+          "label": "3x multiplier",
+          "any": [
+            "\\b3\\s*(x|\\*|×|times)",
+            "three times",
+            "JITTER_MULTIPLIER",
+            "(x|\\*|×)\\s*3\\b"
+          ]
+        },
+        {
+          "label": "base 2 s",
+          "any": [
+            "\\b2(\\.0)?\\s*(s\\b|sec|second)",
+            "backoff_base\\D{0,20}2\\b",
+            "base\\D{0,15}2(\\.0)?\\b"
+          ]
+        },
+        {
+          "label": "cap 900 s",
+          "any": [
+            "\\b900\\b",
+            "15 ?min"
+          ]
+        }
       ]
     },
     {
@@ -18,9 +46,27 @@
       "question": "When does a failing job end up in the dead-letter queue, and how can a single task allow more or fewer attempts than the default?",
       "answer": "After max_attempts attempts (default 7 in Settings), or immediately when the handler raises PermanentError (also TaskNotFound or PayloadError), or when the lease expires on its last attempt. A task overrides the limit with @task(max_attempts=N); a single job can also pass max_attempts to enqueue. RetryAfter does not count as an attempt.",
       "facts": [
-        {"label": "default 7 attempts", "any": ["\\b7\\b", "seven"]},
-        {"label": "PermanentError skips retries", "any": ["PermanentError"]},
-        {"label": "per-task override via @task(max_attempts=...)", "any": ["@task\\s*\\([^)]*max_attempts", "max_attempts\\W{0,40}(@task|task decorator|decorator)", "(@task|task decorator|decorator)\\W{0,80}max_attempts"]}
+        {
+          "label": "default 7 attempts",
+          "any": [
+            "\\b7\\b",
+            "seven"
+          ]
+        },
+        {
+          "label": "PermanentError skips retries",
+          "any": [
+            "PermanentError"
+          ]
+        },
+        {
+          "label": "per-task override via @task(max_attempts=...)",
+          "any": [
+            "@task\\s*\\([^)]*max_attempts",
+            "max_attempts\\W{0,40}(@task|task decorator|decorator)",
+            "(@task|task decorator|decorator)\\W{0,80}max_attempts"
+          ]
+        }
       ]
     },
     {
@@ -28,9 +74,29 @@
       "question": "If lease_seconds is set both in tidepool.toml and in the environment, which value wins, what is the environment variable called, and is there anything that overrides both?",
       "answer": "The environment wins over the file: TIDEPOOL_LEASE_SECONDS. Order is defaults < [tidepool] table in tidepool.toml (or TIDEPOOL_CONFIG) < TIDEPOOL_* env vars < keyword overrides passed to load_settings(), which override both.",
       "facts": [
-        {"label": "env var name", "any": ["TIDEPOOL_LEASE_SECONDS"]},
-        {"label": "env beats file", "any": ["environment\\W[^.]{0,80}(wins|overrid|take|preced|higher)", "env[^.]{0,40}(wins|overrid|take|preced|higher)", "(wins|overrid|preced)[^.]{0,60}(env|environment)"]},
-        {"label": "load_settings keyword overrides beat both", "any": ["load_settings", "keyword", "overrides\\b", "\\*\\*overrides"]}
+        {
+          "label": "env var name",
+          "any": [
+            "TIDEPOOL_LEASE_SECONDS"
+          ]
+        },
+        {
+          "label": "env beats file",
+          "any": [
+            "environment\\W[^.]{0,80}(wins|overrid|take|preced|higher)",
+            "env[^.]{0,40}(wins|overrid|take|preced|higher)",
+            "(wins|overrid|preced)[^.]{0,60}(env|environment)"
+          ]
+        },
+        {
+          "label": "load_settings keyword overrides beat both",
+          "any": [
+            "load_settings",
+            "keyword",
+            "overrides\\b",
+            "\\*\\*overrides"
+          ]
+        }
       ]
     },
     {
@@ -38,10 +104,34 @@
       "question": "How does a worker keep its lease on a long-running job, how often, and what happens to the job if the worker process dies mid-run?",
       "answer": "A Heartbeat thread in worker.py calls Queue.renew every heartbeat_interval = lease_seconds / heartbeat_divisor (60/3 = 20 s by default). If the worker dies the lease expires; worker housekeeping calls Queue.reap_expired every reap_interval_seconds (15 s), which puts the job back to queued (runnable now) and counts the lost run as an attempt, dead-lettering it if that was the last attempt.",
       "facts": [
-        {"label": "heartbeat renews the lease", "any": ["heartbeat", "renew"]},
-        {"label": "every lease/3 = 20 s", "any": ["\\b20\\s*(s\\b|sec)", "lease_seconds\\s*/\\s*(3|heartbeat_divisor)", "third of the lease", "/\\s*3\\b"]},
-        {"label": "reaper returns expired leases", "any": ["reap"]},
-        {"label": "counts as an attempt", "any": ["attempt"]}
+        {
+          "label": "heartbeat renews the lease",
+          "any": [
+            "heartbeat",
+            "renew"
+          ]
+        },
+        {
+          "label": "every lease/3 = 20 s",
+          "any": [
+            "\\b20\\s*(s\\b|sec)",
+            "lease_seconds\\s*/\\s*(3|heartbeat_divisor)",
+            "third of the lease",
+            "/\\s*3\\b"
+          ]
+        },
+        {
+          "label": "reaper returns expired leases",
+          "any": [
+            "reap"
+          ]
+        },
+        {
+          "label": "counts as an attempt",
+          "any": [
+            "attempt"
+          ]
+        }
       ]
     },
     {
@@ -49,10 +139,38 @@
       "question": "How does tidepool stop low-priority jobs from starving behind high-priority ones? Give the exact numbers.",
       "answer": "Priority aging in priority.py: effective priority = base priority + one step per 90 seconds waited (AGING_STEP_SECONDS), at most +5 (MAX_AGING_BOOST), clamped to the maximum priority 9. Leasing orders by effective priority, then by how long the job has been runnable.",
       "facts": [
-        {"label": "aging", "any": ["aging", "ageing", "effective priority", "effective_priority"]},
-        {"label": "90 s per step", "any": ["\\b90\\b"]},
-        {"label": "boost capped at +5", "any": ["\\+\\s*5\\b", "\\b5 (steps|levels|points)", "MAX_AGING_BOOST", "at most 5", "max(imum)? (boost )?(of )?5\\b", "capped at 5"]},
-        {"label": "max priority 9", "any": ["\\b9\\b"]}
+        {
+          "label": "aging",
+          "any": [
+            "aging",
+            "ageing",
+            "effective priority",
+            "effective_priority"
+          ]
+        },
+        {
+          "label": "90 s per step",
+          "any": [
+            "\\b90\\b"
+          ]
+        },
+        {
+          "label": "boost capped at +5",
+          "any": [
+            "\\+\\s*5\\b",
+            "\\b5 (steps|levels|points)",
+            "MAX_AGING_BOOST",
+            "at most 5",
+            "max(imum)? (boost )?(of )?5\\b",
+            "capped at 5"
+          ]
+        },
+        {
+          "label": "max priority 9",
+          "any": [
+            "\\b9\\b"
+          ]
+        }
       ]
     },
     {
@@ -60,10 +178,35 @@
       "question": "How are the webhook calls for dead jobs signed, which header carries the signature, and how does a receiver reject replayed requests?",
       "answer": "HMAC-SHA256 keyed with webhook_secret over the timestamp, a dot and the raw body (f\"{t}.\" + body). Sent in the X-Tidepool-Signature header as t=<unix seconds>,v1=<hex>. webhooks.verify rejects signatures more than 300 seconds (5 minutes) from the receiver's clock and compares with hmac.compare_digest.",
       "facts": [
-        {"label": "HMAC-SHA256", "any": ["hmac[- _]?sha-?256", "sha-?256[^.]{0,40}hmac", "hmac[^.]{0,60}sha-?256"]},
-        {"label": "header name", "any": ["X-Tidepool-Signature"]},
-        {"label": "timestamp + body signed", "any": ["timestamp[^.]{0,60}(dot|\\.|body)", "t=\\S*,\\s*v1="]},
-        {"label": "300 s tolerance", "any": ["\\b300\\b", "5 ?min", "five minutes"]}
+        {
+          "label": "HMAC-SHA256",
+          "any": [
+            "hmac[- _]?sha-?256",
+            "sha-?256[^.]{0,40}hmac",
+            "hmac[^.]{0,60}sha-?256"
+          ]
+        },
+        {
+          "label": "header name",
+          "any": [
+            "X-Tidepool-Signature"
+          ]
+        },
+        {
+          "label": "timestamp + body signed",
+          "any": [
+            "timestamp[^.]{0,60}(dot|\\.|body)",
+            "t=\\S*,\\s*v1="
+          ]
+        },
+        {
+          "label": "300 s tolerance",
+          "any": [
+            "\\b300\\b",
+            "5 ?min",
+            "five minutes"
+          ]
+        }
       ]
     },
     {
@@ -71,9 +214,29 @@
       "question": "When are job payloads compressed, with what, and how does the decoder know whether a stored payload is compressed?",
       "answer": "payload.py compresses the JSON with zlib (level 6) when it is longer than COMPRESS_THRESHOLD = 4096 bytes, and only if that makes it smaller. Every encoded payload starts with a one-byte header: b\"j\" for raw JSON, b\"z\" for zlib; decode switches on that byte.",
       "facts": [
-        {"label": "zlib", "any": ["zlib"]},
-        {"label": "threshold 4096 bytes", "any": ["4096", "4 ?ki?b"]},
-        {"label": "header byte j / z", "any": ["b?[\"']z[\"']", "header byte", "first byte", "prefix byte", "one[- ]byte"]}
+        {
+          "label": "zlib",
+          "any": [
+            "zlib"
+          ]
+        },
+        {
+          "label": "threshold 4096 bytes",
+          "any": [
+            "4096",
+            "4 ?ki?b"
+          ]
+        },
+        {
+          "label": "header byte j / z",
+          "any": [
+            "b?[\"']z[\"']",
+            "header byte",
+            "first byte",
+            "prefix byte",
+            "one[- ]byte"
+          ]
+        }
       ]
     },
     {
@@ -81,9 +244,29 @@
       "question": "The scheduler process was down for an hour. What happens to the periodic jobs that should have run during that time when it starts again?",
       "answer": "Missed runs are never replayed one by one. On the first tick after the due time, a run that is at most misfire_grace_seconds (60 s) late is enqueued once (coalesced); anything later than that, like after an hour of downtime, is skipped and logged. The next due time is computed from now, so there is no burst.",
       "facts": [
-        {"label": "skipped, not replayed", "any": ["skip"]},
-        {"label": "60 s misfire grace", "any": ["\\b60\\s*(s\\b|sec)", "misfire_grace", "grace[^.]{0,30}60"]},
-        {"label": "next run computed from now", "any": ["from (the current time|now)", "\\bnow\\b", "no burst", "following\\("]}
+        {
+          "label": "skipped, not replayed",
+          "any": [
+            "skip"
+          ]
+        },
+        {
+          "label": "60 s misfire grace",
+          "any": [
+            "\\b60\\s*(s\\b|sec)",
+            "misfire_grace",
+            "grace[^.]{0,30}60"
+          ]
+        },
+        {
+          "label": "next run computed from now",
+          "any": [
+            "from (the current time|now)",
+            "\\bnow\\b",
+            "no burst",
+            "following\\("
+          ]
+        }
       ]
     },
     {
@@ -91,10 +274,35 @@
       "question": "How does an operator send dead-lettered jobs back to the queue from the command line, what does requeueing reset on each job, and how long are dead jobs kept if nobody requeues them?",
       "answer": "tidepool dlq requeue QUEUE --id JOB_ID (repeatable) or --all. deadletter.requeue sets state back to queued, attempts to 0, clears last_error and the backoff (last_delay) and finished_at, and makes it runnable now; priority and dedupe key are kept. Unrequeued dead jobs are purged after dlq_retention_days = 14 days (tidepool dlq purge or the worker's daily housekeeping).",
       "facts": [
-        {"label": "CLI command", "any": ["dlq requeue"]},
-        {"label": "attempts reset to 0", "any": ["attempts[^.]{0,25}\\b(0|zero)\\b", "\\b(0|zero)\\b\\W{0,10}attempts", "reset[^.]{0,40}attempt"]},
-        {"label": "error cleared", "any": ["last_error", "error"]},
-        {"label": "14 days retention", "any": ["\\b14\\b", "fourteen", "two weeks"]}
+        {
+          "label": "CLI command",
+          "any": [
+            "dlq requeue"
+          ]
+        },
+        {
+          "label": "attempts reset to 0",
+          "any": [
+            "attempts[^.]{0,25}\\b(0|zero)\\b",
+            "\\b(0|zero)\\b\\W{0,10}attempts",
+            "reset[^.]{0,40}attempt"
+          ]
+        },
+        {
+          "label": "error cleared",
+          "any": [
+            "last_error",
+            "error"
+          ]
+        },
+        {
+          "label": "14 days retention",
+          "any": [
+            "\\b14\\b",
+            "fourteen",
+            "two weeks"
+          ]
+        }
       ]
     },
     {
@@ -102,10 +310,2486 @@
       "question": "How does per-queue rate limiting work, what burst is used when the limit does not specify one, and what does a worker do when it is rate limited?",
       "answer": "A token bucket per queue (ratelimit.py), configured like emails=50/s (or /m, /h), optionally with :burst. Without an explicit burst the bucket holds two seconds' worth of tokens, max(1, 2 * rate per second). The worker asks for a token before leasing; if none is available it does not lease, it sleeps for the time until the next token, so the job keeps its place and is not charged an attempt. Buckets are per worker process.",
       "facts": [
-        {"label": "token bucket", "any": ["token bucket", "TokenBucket"]},
-        {"label": "burst = 2x rate", "any": ["two seconds", "2 seconds", "2\\s*(x|\\*|×)\\s*(the )?rate", "twice", "DEFAULT_BURST_SECONDS", "2 \\* rate"]},
-        {"label": "sleeps instead of leasing", "any": ["sleep", "wait"]},
-        {"label": "before leasing / no attempt charged", "any": ["before leas", "not leas", "doesn'?t leas", "without leasing", "no attempt", "not (charged|count)"]}
+        {
+          "label": "token bucket",
+          "any": [
+            "token bucket",
+            "TokenBucket"
+          ]
+        },
+        {
+          "label": "burst = 2x rate",
+          "any": [
+            "two seconds",
+            "2 seconds",
+            "2\\s*(x|\\*|×)\\s*(the )?rate",
+            "twice",
+            "DEFAULT_BURST_SECONDS",
+            "2 \\* rate"
+          ]
+        },
+        {
+          "label": "sleeps instead of leasing",
+          "any": [
+            "sleep",
+            "wait"
+          ]
+        },
+        {
+          "label": "before leasing / no attempt charged",
+          "any": [
+            "before leas",
+            "not leas",
+            "doesn'?t leas",
+            "without leasing",
+            "no attempt",
+            "not (charged|count)"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "q11-job-states",
+      "question": "What states can a tidepool job be in, and is there a separate state for a job whose attempt just failed?",
+      "answer": "JobState in job.py: queued, leased, succeeded, dead and cancelled. There is no 'failed' state: a failed attempt goes from leased straight back to queued with a later run_at, and the last error is stored on the job. Dead jobs can go back to queued when an operator requeues them.",
+      "facts": [
+        {
+          "label": "lists leased and cancelled",
+          "any": [
+            "leased[^.]{0,80}cancel",
+            "cancel[^.]{0,80}leased"
+          ]
+        },
+        {
+          "label": "dead state",
+          "any": [
+            "\\bdead\\b"
+          ]
+        },
+        {
+          "label": "no failed state, back to queued",
+          "any": [
+            "no (separate |distinct |dedicated )?[\"'`]?failed",
+            "not a separate",
+            "back to [\"'`]?queued",
+            "returns? to [\"'`]?queued",
+            "goes? (straight )?(back )?to [\"'`]?queued"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "q12-retry-after",
+      "question": "How can a tidepool handler ask to be retried after a specific delay, for example on an upstream 429, and does that attempt count against max_attempts?",
+      "answer": "Raise RetryAfter(seconds) from the handler. The retry policy uses that delay instead of the backoff (clamped to at least 0 and at most backoff_cap, 900 s), and the attempt does not count towards max_attempts (Queue.fail takes the attempt back).",
+      "facts": [
+        {
+          "label": "RetryAfter",
+          "any": [
+            "RetryAfter"
+          ]
+        },
+        {
+          "label": "does not count",
+          "any": [
+            "(not|n'?t|never) (count|counted|charged)",
+            "doesn'?t count",
+            "does not count",
+            "not towards",
+            "no attempt"
+          ]
+        },
+        {
+          "label": "capped at backoff_cap",
+          "any": [
+            "\\b900\\b",
+            "backoff_cap",
+            "\\bcap"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "q13-timeout",
+      "question": "How is a per-task time limit set in tidepool, what exception results when a handler runs too long, and how long is the retry delay after such a timeout at minimum?",
+      "answer": "@task(timeout=SECONDS). The worker waits on the handler future with that timeout and raises JobTimeout when it expires. The retry policy then waits at least backoff_cap / 10 (90 s with the default 900 s cap), or the normal backoff delay if that is longer.",
+      "facts": [
+        {
+          "label": "@task(timeout=)",
+          "any": [
+            "timeout\\s*="
+          ]
+        },
+        {
+          "label": "JobTimeout",
+          "any": [
+            "JobTimeout"
+          ]
+        },
+        {
+          "label": "at least cap/10 = 90 s",
+          "any": [
+            "\\b90\\b",
+            "cap\\s*/\\s*10",
+            "tenth of the cap",
+            "one tenth",
+            "1/10"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "q14-dedupe",
+      "question": "How does tidepool deduplicate enqueues: how is the key made for @task(dedupe=True), how long is the window, and does a dead job with the same key block a new enqueue?",
+      "answer": "Queue.enqueue derives the key as a SHA-1 of the JSON of [task name, args, kwargs] (sort_keys) unless an explicit dedupe_key is given. If a job with that key in the same queue was enqueued within dedupe_window_seconds (86,400 s = 24 hours), the existing job is returned instead of a new one. Dead and cancelled jobs are ignored, so they do not block a new enqueue.",
+      "facts": [
+        {
+          "label": "sha1",
+          "any": [
+            "sha-?1"
+          ]
+        },
+        {
+          "label": "24 h window",
+          "any": [
+            "86[,_ ]?400",
+            "24 ?h",
+            "one day",
+            "a day",
+            "1 day"
+          ]
+        },
+        {
+          "label": "dead jobs don't block",
+          "any": [
+            "dead[^.]{0,80}(ignor|not (block|count|match|consider)|excluded|don'?t)",
+            "(ignor|exclud|skip)[^.]{0,40}dead",
+            "\\bno\\b[^.]{0,40}dead"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "q15-sqlite-lease",
+      "question": "How does the SQLite backend make sure two workers never lease the same job?",
+      "answer": "SQLiteStorage.lease runs a conditional UPDATE ... SET state = 'leased' ... WHERE id = ? AND state = 'queued' inside a BEGIN IMMEDIATE transaction; the loser of a race sees rowcount 0 and gets None. WAL mode keeps readers from blocking workers.",
+      "facts": [
+        {
+          "label": "BEGIN IMMEDIATE",
+          "any": [
+            "immediate"
+          ]
+        },
+        {
+          "label": "conditional update on state queued",
+          "any": [
+            "state\\s*=\\s*'?queued",
+            "where[^.]{0,60}queued",
+            "conditional update",
+            "rowcount",
+            "rows? (changed|affected|updated)"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "q16-lost-lease",
+      "question": "What does a tidepool worker do if renewing the lease fails while a handler is still running?",
+      "answer": "The Heartbeat sets its lost flag and stops renewing (logging 'lost lease'). When the handler finishes the worker sees hb.lost and drops the result: it neither completes nor fails the job, because another worker may already be running it (LeaseLost).",
+      "facts": [
+        {
+          "label": "heartbeat/renewal stops",
+          "any": [
+            "heartbeat",
+            "renew"
+          ]
+        },
+        {
+          "label": "drops the result",
+          "any": [
+            "drop",
+            "discard",
+            "ignor",
+            "not (complete|mark|record)",
+            "doesn'?t (complete|mark|record)",
+            "neither"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "q17-shutdown",
+      "question": "What happens when a tidepool worker receives SIGTERM while jobs are running?",
+      "answer": "The signal handler sets stopping: slots stop leasing new jobs and the worker waits up to shutdown_grace_seconds (30 s) for running handlers. Handlers still running after that are abandoned; their leases expire and the reaper hands those jobs to another worker.",
+      "facts": [
+        {
+          "label": "stops leasing",
+          "any": [
+            "stop[^.]{0,30}leas",
+            "no (new|more) (jobs|leases)",
+            "stops? (taking|picking|accepting)"
+          ]
+        },
+        {
+          "label": "30 s grace",
+          "any": [
+            "\\b30\\s*(s\\b|sec)",
+            "shutdown_grace"
+          ]
+        },
+        {
+          "label": "abandoned jobs reaped via lease expiry",
+          "any": [
+            "expir",
+            "reap"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "q18-admin-auth",
+      "question": "How is the tidepool admin HTTP API authenticated, which route needs no auth, and what happens if no token is configured?",
+      "answer": "Every route except GET /healthz needs Authorization: Bearer <admin_token>, compared with hmac.compare_digest. Without admin_token (TIDEPOOL_ADMIN_TOKEN) AdminApp raises ConfigError and refuses to start, so the API is never open by accident.",
+      "facts": [
+        {
+          "label": "Bearer token",
+          "any": [
+            "bearer"
+          ]
+        },
+        {
+          "label": "/healthz open",
+          "any": [
+            "healthz"
+          ]
+        },
+        {
+          "label": "refuses to start without token",
+          "any": [
+            "refus",
+            "ConfigError",
+            "won'?t start",
+            "not start",
+            "raises",
+            "fails? to start",
+            "cannot start",
+            "can'?t start"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "q19-admin-dlq-limit",
+      "question": "In tidepool's admin API, how do you list dead jobs for a queue, and what are the default and maximum number returned?",
+      "answer": "GET /dlq/<queue>?limit=N. The default limit is 50 and it is capped at 500. POST /dlq/<queue>/requeue with {\"ids\": [...]} or {\"all\": true} requeues them.",
+      "facts": [
+        {
+          "label": "route",
+          "any": [
+            "/dlq/"
+          ]
+        },
+        {
+          "label": "default 50",
+          "any": [
+            "\\b50\\b"
+          ]
+        },
+        {
+          "label": "max 500",
+          "any": [
+            "\\b500\\b"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "q20-metrics",
+      "question": "Where does a tidepool worker expose metrics, and which metric should you alert on to catch jobs being dead-lettered?",
+      "answer": "Prometheus text format on metrics_port 9464 at /metrics (metrics.serve). Alert on tidepool_jobs_total{outcome=\"dead\"} rising (and on tidepool_queue_wait_seconds p95).",
+      "facts": [
+        {
+          "label": "port 9464",
+          "any": [
+            "9464"
+          ]
+        },
+        {
+          "label": "/metrics",
+          "any": [
+            "/metrics"
+          ]
+        },
+        {
+          "label": "tidepool_jobs_total dead",
+          "any": [
+            "tidepool_jobs_total"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "q21-histogram-buckets",
+      "question": "What histogram buckets does tidepool's metrics registry use, and which metrics are histograms?",
+      "answer": "BUCKETS = (0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 15.0, 60.0, 300.0, 900.0) seconds plus +Inf. The histograms are tidepool_job_duration_seconds{queue,task} and tidepool_queue_wait_seconds{queue}.",
+      "facts": [
+        {
+          "label": "smallest 0.01",
+          "any": [
+            "0\\.01"
+          ]
+        },
+        {
+          "label": "largest 900",
+          "any": [
+            "\\b900\\b"
+          ]
+        },
+        {
+          "label": "job duration histogram",
+          "any": [
+            "job_duration"
+          ]
+        },
+        {
+          "label": "queue wait histogram",
+          "any": [
+            "queue_wait"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "q22-validation",
+      "question": "Which limits does tidepool's Settings.validate enforce on lease_seconds, heartbeat_divisor and max_attempts?",
+      "answer": "lease_seconds must be at least 10, heartbeat_divisor at least 2 (or leases expire mid-beat), and max_attempts between 1 and 100. It also checks 0 < backoff_base <= backoff_cap, default_priority 0-9, and that webhook_url comes with webhook_secret. Violations raise ConfigError.",
+      "facts": [
+        {
+          "label": "lease >= 10",
+          "any": [
+            "\\b10\\b"
+          ]
+        },
+        {
+          "label": "divisor >= 2",
+          "any": [
+            "divisor[^.]{0,60}\\b2\\b",
+            "\\b2\\b[^.]{0,40}divisor"
+          ]
+        },
+        {
+          "label": "max_attempts 1-100",
+          "any": [
+            "\\b100\\b"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "q23-webhook-delivery",
+      "question": "How does tidepool deliver a dead-job webhook if the receiver is down, and does a slow receiver block the worker?",
+      "answer": "deliver() tries up to four times, waiting 1, 5 and 25 seconds between tries (DELIVERY_BACKOFF), each request with a 10 s timeout. It runs on a background daemon thread, so the worker never blocks. After the last failure the event is dropped and logged.",
+      "facts": [
+        {
+          "label": "four tries",
+          "any": [
+            "\\b4\\b",
+            "four"
+          ]
+        },
+        {
+          "label": "1, 5, 25 s",
+          "any": [
+            "\\b25\\b"
+          ]
+        },
+        {
+          "label": "background thread",
+          "any": [
+            "thread",
+            "background",
+            "asynchronous"
+          ]
+        },
+        {
+          "label": "dropped after last failure",
+          "any": [
+            "drop",
+            "give up",
+            "gives up",
+            "gave up",
+            "discard",
+            "logged",
+            "lost"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "q24-webhook-config",
+      "question": "What has to be configured for tidepool to send webhooks, and what happens if webhook_url is set without a secret?",
+      "answer": "Set webhook_url and webhook_secret; the worker calls webhooks.install, which subscribes to the job.dead hook. Settings.validate raises ConfigError if webhook_url is set without webhook_secret, because receivers could not verify calls.",
+      "facts": [
+        {
+          "label": "webhook_secret",
+          "any": [
+            "webhook_secret",
+            "secret"
+          ]
+        },
+        {
+          "label": "ConfigError on missing secret",
+          "any": [
+            "ConfigError",
+            "config(uration)? error",
+            "refus",
+            "reject",
+            "invalid",
+            "raises",
+            "fails? validation"
+          ]
+        },
+        {
+          "label": "job.dead event",
+          "any": [
+            "job\\.dead",
+            "dead"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "q25-payload-types",
+      "question": "Which Python types can a tidepool job payload carry beyond plain JSON, and what happens with an unsupported type?",
+      "answer": "payload._default encodes datetime ({\"__dt__\": iso}), Decimal (__dec__), UUID (__uuid__), bytes (base64, __b64__) and set/frozenset (__set__, sorted); decode restores them. Anything else raises PayloadError at enqueue time.",
+      "facts": [
+        {
+          "label": "datetime",
+          "any": [
+            "datetime",
+            "__dt__"
+          ]
+        },
+        {
+          "label": "Decimal",
+          "any": [
+            "decimal",
+            "__dec__"
+          ]
+        },
+        {
+          "label": "UUID",
+          "any": [
+            "uuid"
+          ]
+        },
+        {
+          "label": "bytes",
+          "any": [
+            "bytes",
+            "base64",
+            "__b64__"
+          ]
+        },
+        {
+          "label": "sets",
+          "any": [
+            "\\bsets?\\b",
+            "frozenset",
+            "__set__"
+          ]
+        },
+        {
+          "label": "PayloadError",
+          "any": [
+            "PayloadError"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "q26-payload-limit",
+      "question": "Is there a size limit on tidepool job payloads, and is it checked before or after compression?",
+      "answer": "MAX_PAYLOAD_BYTES = 1,048,576 bytes (1 MiB), checked after compression; a bigger payload raises PayloadError at enqueue time. Store large blobs elsewhere and pass a key.",
+      "facts": [
+        {
+          "label": "1 MiB",
+          "any": [
+            "1[,_ ]?048[,_ ]?576",
+            "1 ?mi?b",
+            "one megabyte",
+            "1 megabyte"
+          ]
+        },
+        {
+          "label": "after compression",
+          "any": [
+            "after compress"
+          ]
+        },
+        {
+          "label": "PayloadError",
+          "any": [
+            "PayloadError",
+            "refus",
+            "reject"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "q27-cancel",
+      "question": "Which tidepool jobs can be cancelled, and what does the admin API return when cancelling one that cannot be?",
+      "answer": "Queue.cancel only cancels jobs in state queued (it moves them to cancelled and sets finished_at); for a leased, finished or missing job it returns False. POST /jobs/<id>/cancel answers 200 with {\"cancelled\": true}, or 409 Conflict with {\"cancelled\": false}.",
+      "facts": [
+        {
+          "label": "only queued",
+          "any": [
+            "queued"
+          ]
+        },
+        {
+          "label": "409 Conflict",
+          "any": [
+            "409",
+            "conflict"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "q28-lease-scan",
+      "question": "When a worker calls lease_next, how many candidate jobs does tidepool look at and in what order does it try them?",
+      "answer": "It reads up to LEASE_SCAN_LIMIT = 200 runnable jobs (queued with run_at passed) and sorts them with priority.lease_order: highest effective priority first, then the one runnable longest (earliest run_at/enqueued_at), then id. It leases the first one the storage hands over atomically.",
+      "facts": [
+        {
+          "label": "200",
+          "any": [
+            "\\b200\\b"
+          ]
+        },
+        {
+          "label": "effective priority",
+          "any": [
+            "effective",
+            "aging",
+            "priority"
+          ]
+        },
+        {
+          "label": "then oldest",
+          "any": [
+            "longest",
+            "oldest",
+            "earliest",
+            "run_at",
+            "first[- ]come",
+            "waited"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "q29-worker-id",
+      "question": "How is a tidepool worker's identity (the leased_by value) built?",
+      "answer": "worker_id() returns f\"{hostname}:{pid}:{thread ident % 10000}\": socket.gethostname(), os.getpid() and threading.get_ident() modulo 10,000.",
+      "facts": [
+        {
+          "label": "hostname",
+          "any": [
+            "hostname"
+          ]
+        },
+        {
+          "label": "pid",
+          "any": [
+            "pid",
+            "process id"
+          ]
+        },
+        {
+          "label": "thread ident mod 10000",
+          "any": [
+            "10[,_ ]?000",
+            "get_ident",
+            "thread"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "q30-worker-pools",
+      "question": "How many threads does a tidepool worker use with the default settings, and how long does a slot wait when there is nothing to lease?",
+      "answer": "concurrency = 4 slots on one ThreadPoolExecutor, plus a handler pool of concurrency * 2 = 8 threads (handlers run there so timeouts can be enforced), plus the housekeeping and heartbeat threads. An idle slot waits poll_interval = 0.5 s before polling again.",
+      "facts": [
+        {
+          "label": "4 slots",
+          "any": [
+            "\\b4\\b",
+            "four"
+          ]
+        },
+        {
+          "label": "handler pool 2x",
+          "any": [
+            "\\b8\\b",
+            "2\\s*(x|\\*|×)",
+            "\\*\\s*2",
+            "twice",
+            "double"
+          ]
+        },
+        {
+          "label": "0.5 s poll",
+          "any": [
+            "0\\.5",
+            "half a second"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "q31-hooks",
+      "question": "How do tidepool's event hooks behave: which thread runs a subscriber, and what happens if a subscriber raises?",
+      "answer": "hooks.emit calls subscribers synchronously in the thread that emitted the event (subscribers of \"*\" get every event). An exception in a subscriber is logged and swallowed, so a broken plugin cannot fail a job. Events are job.enqueued, job.leased, job.succeeded, job.retrying, job.dead and job.requeued.",
+      "facts": [
+        {
+          "label": "synchronous, same thread",
+          "any": [
+            "synchron",
+            "same thread",
+            "emitting thread",
+            "thread that emit",
+            "inline"
+          ]
+        },
+        {
+          "label": "exceptions swallowed",
+          "any": [
+            "swallow",
+            "logged",
+            "caught",
+            "ignored",
+            "suppress"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "q32-schedule-kinds",
+      "question": "What are the two ways to define a periodic job in tidepool's scheduler, and what is the shortest allowed interval?",
+      "answer": "A Schedule takes exactly one of every=SECONDS or daily_at=\"HH:MM\" (UTC). every must be at least one second (TICK_SECONDS), since the scheduler ticks once a second.",
+      "facts": [
+        {
+          "label": "every",
+          "any": [
+            "every"
+          ]
+        },
+        {
+          "label": "daily_at",
+          "any": [
+            "daily_at"
+          ]
+        },
+        {
+          "label": "1 second minimum",
+          "any": [
+            "one second",
+            "1 ?s\\b",
+            "1(\\.0)? sec",
+            "TICK_SECONDS"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "q33-task-not-found",
+      "question": "What happens to a tidepool job whose task name is not registered in the worker process?",
+      "answer": "get_task raises TaskNotFound. The worker counts the attempt and calls Queue.fail; TaskNotFound is in NEVER_RETRY, so the job is dead-lettered on the first try. Fix with --import so the @task decorators run.",
+      "facts": [
+        {
+          "label": "TaskNotFound",
+          "any": [
+            "TaskNotFound"
+          ]
+        },
+        {
+          "label": "dead-lettered immediately",
+          "any": [
+            "dead",
+            "DLQ",
+            "never retr",
+            "not retried"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "q34-task-names",
+      "question": "What name does @task register a function under by default, and what happens if two different functions use the same name?",
+      "answer": "The default name is f\"{fn.__module__}.{fn.__qualname__}\". Registering a different function under a name that is already taken raises ValueError (re-registering the same function is fine).",
+      "facts": [
+        {
+          "label": "module",
+          "any": [
+            "__module__",
+            "module"
+          ]
+        },
+        {
+          "label": "qualname",
+          "any": [
+            "qualname"
+          ]
+        },
+        {
+          "label": "ValueError",
+          "any": [
+            "ValueError",
+            "raises",
+            "error"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "q35-priority-resolution",
+      "question": "When a tidepool job is enqueued, where does its priority come from, and what range is it clamped to?",
+      "answer": "The priority argument to enqueue if given, else the task's @task(priority=...), else Settings.default_priority (5). The result is clamped to 0-9 (MIN_PRIORITY to MAX_PRIORITY); 9 is the highest.",
+      "facts": [
+        {
+          "label": "default_priority 5",
+          "any": [
+            "default_priority",
+            "\\b5\\b"
+          ]
+        },
+        {
+          "label": "task-level priority",
+          "any": [
+            "@task",
+            "task's",
+            "task decorator",
+            "task spec",
+            "TaskSpec"
+          ]
+        },
+        {
+          "label": "clamped 0-9",
+          "any": [
+            "0\\s*(-|–|to|and)\\s*9",
+            "clamp"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "q36-rate-limit-config",
+      "question": "How are tidepool rate limits configured in the file and in the environment, and what happens to the effective rate when you run several worker processes?",
+      "answer": "As a [tidepool.rate_limits] table in tidepool.toml, or TIDEPOOL_RATE_LIMITS as a comma list like emails=50/s,reports=10/m. Buckets are per worker process, so N processes allow N times the configured rate; divide accordingly.",
+      "facts": [
+        {
+          "label": "TIDEPOOL_RATE_LIMITS",
+          "any": [
+            "TIDEPOOL_RATE_LIMITS"
+          ]
+        },
+        {
+          "label": "rate_limits table",
+          "any": [
+            "rate_limits\\]",
+            "\\[tidepool\\.rate_limits",
+            "rate_limits table",
+            "table"
+          ]
+        },
+        {
+          "label": "multiplied per process",
+          "any": [
+            "N times",
+            "multipl",
+            "per (worker )?process",
+            "each process",
+            "times the"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "q37-storage-choice",
+      "question": "Which storage backends does tidepool have, how is one chosen, and can the in-memory one be shared between processes?",
+      "answer": "open_storage(settings.database): \":memory:\" gives MemoryStorage, anything else is a SQLite file path (default tidepool.db) for SQLiteStorage. MemoryStorage is in-process only and not shared between processes; SQLite lets many workers on one host share the file.",
+      "facts": [
+        {
+          "label": ":memory:",
+          "any": [
+            ":memory:"
+          ]
+        },
+        {
+          "label": "SQLite default file",
+          "any": [
+            "tidepool\\.db",
+            "sqlite"
+          ]
+        },
+        {
+          "label": "memory not shared",
+          "any": [
+            "not shared",
+            "in-process",
+            "single process",
+            "one process",
+            "same process",
+            "cannot be shared",
+            "can'?t be shared",
+            "isn'?t shared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "q38-reaper-errors",
+      "question": "What does tidepool record as the error on a job whose worker died, both when it is retried and when it is dead-lettered?",
+      "answer": "reap_expired sets last_error to \"lease expired while held by <worker id>\" and makes it runnable now; if that was the last attempt it is dead-lettered with \"lease expired (worker lost)\".",
+      "facts": [
+        {
+          "label": "retried message",
+          "any": [
+            "held by"
+          ]
+        },
+        {
+          "label": "dead message",
+          "any": [
+            "worker lost"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "q39-cli-imports",
+      "question": "When starting a tidepool worker from the command line, how do you make sure your handlers are registered, and how do you pick which queues it serves?",
+      "answer": "Pass --import myapp.tasks (repeatable) so the @task decorators run before the worker starts, and --queue NAME (repeatable; default is the 'default' queue): tidepool --import myapp.tasks worker --queue emails.",
+      "facts": [
+        {
+          "label": "--import",
+          "any": [
+            "--import"
+          ]
+        },
+        {
+          "label": "--queue",
+          "any": [
+            "--queue"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "q40-retry-timeline",
+      "question": "With tidepool's default retry settings, which attempt is the last one, and roughly how far out is the seventh attempt?",
+      "answer": "max_attempts defaults to 7, so the seventh attempt is the last; if it fails the job is dead-lettered. retry.py notes the seventh attempt is typically a few minutes out, since delays grow by up to 3x per attempt from 2 s and are capped at 900 s.",
+      "facts": [
+        {
+          "label": "7 attempts",
+          "any": [
+            "\\b7\\b",
+            "seven"
+          ]
+        },
+        {
+          "label": "few minutes",
+          "any": [
+            "minutes"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rq01-defaults",
+      "package": "rq",
+      "question": "What are RQ's default result TTL, failure TTL and job timeout?",
+      "answer": "DEFAULT_RESULT_TTL = 500 s, DEFAULT_FAILURE_TTL = 31,536,000 s (1 year), and Queue.DEFAULT_TIMEOUT = 180 s.",
+      "facts": [
+        {
+          "label": "500 s results",
+          "any": [
+            "\\b500\\b"
+          ]
+        },
+        {
+          "label": "1 year failures",
+          "any": [
+            "31[,_ ]?536[,_ ]?000",
+            "1 ?year",
+            "one year",
+            "a year",
+            "365"
+          ]
+        },
+        {
+          "label": "180 s timeout",
+          "any": [
+            "\\b180\\b",
+            "3 ?min"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rq02-worker-ttl",
+      "package": "rq",
+      "question": "What are RQ's default worker TTL and job monitoring interval?",
+      "answer": "DEFAULT_WORKER_TTL = 420 seconds; DEFAULT_JOB_MONITORING_INTERVAL = 30 seconds.",
+      "facts": [
+        {
+          "label": "420",
+          "any": [
+            "\\b420\\b",
+            "7 ?min"
+          ]
+        },
+        {
+          "label": "30",
+          "any": [
+            "\\b30\\b"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rq03-key-prefix",
+      "package": "rq",
+      "question": "How can you change the prefix of all Redis keys RQ uses, and which characters are allowed?",
+      "answer": "Set the RQ_KEY_PREFIX environment variable (default 'rq') before importing rq. It may only contain letters, digits and _ . : - { }; anything else raises ValueError at import.",
+      "facts": [
+        {
+          "label": "RQ_KEY_PREFIX",
+          "any": [
+            "RQ_KEY_PREFIX"
+          ]
+        },
+        {
+          "label": "default rq",
+          "any": [
+            "['\"`]rq['\"`]",
+            "default[^.]{0,20}\\brq\\b"
+          ]
+        },
+        {
+          "label": "ValueError",
+          "any": [
+            "ValueError",
+            "raise",
+            "error"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rq04-queue-keys",
+      "package": "rq",
+      "question": "What Redis keys hold an RQ queue's job ids and the set of all queues, and how does at_front change the push?",
+      "answer": "Each queue is a list at rq:queue:<name>; rq:queues is the set of all queue keys. push_job_id uses RPUSH normally and LPUSH with at_front=True, so the job is dequeued next.",
+      "facts": [
+        {
+          "label": "rq:queue:",
+          "any": [
+            "rq:queue:"
+          ]
+        },
+        {
+          "label": "rq:queues",
+          "any": [
+            "rq:queues"
+          ]
+        },
+        {
+          "label": "LPUSH at front",
+          "any": [
+            "lpush"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rq05-retry",
+      "package": "rq",
+      "question": "How do you make an RQ job retry on failure with increasing delays?",
+      "answer": "Pass retry=Retry(max=3, interval=[10, 30, 60]) to enqueue. max must be at least 1 and intervals cannot be negative; interval is one int or a list of ints (default 0, no delay). enqueue_at_front=True puts retried jobs at the front of the queue.",
+      "facts": [
+        {
+          "label": "Retry(max=..)",
+          "any": [
+            "Retry\\("
+          ]
+        },
+        {
+          "label": "interval list",
+          "any": [
+            "interval"
+          ]
+        },
+        {
+          "label": "max >= 1",
+          "any": [
+            "at least 1",
+            "greater than 0",
+            "\\bmax\\b"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rq06-retry-interval-list",
+      "package": "rq",
+      "question": "If an RQ Retry has fewer intervals than retries, which interval does Retry.get_interval use for the later retries?",
+      "answer": "get_interval uses index = min(len(intervals) - 1, count), so once the retry count passes the end of the list it keeps using the last interval. A single int is used for every retry; an empty list means 0.",
+      "facts": [
+        {
+          "label": "last interval",
+          "any": [
+            "last"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rq07-dependencies",
+      "package": "rq",
+      "question": "What happens when an RQ job is enqueued with depends_on and a dependency has not finished yet?",
+      "answer": "The job is saved with status deferred and registered as a dependent instead of being pushed to the queue; it is enqueued when its dependencies finish. A dependency counts as met when it is finished, or also failed if the job has allow_dependency_failures=True.",
+      "facts": [
+        {
+          "label": "deferred",
+          "any": [
+            "deferred"
+          ]
+        },
+        {
+          "label": "allow_dependency_failures",
+          "any": [
+            "allow_dependency_failures"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rq08-unique",
+      "package": "rq",
+      "question": "How does RQ enforce a unique job, and what does it require?",
+      "answer": "Pass unique=True with an explicit job_id; enqueue raises DuplicateJobError if a job with that id already exists. unique=True without job_id raises ValueError.",
+      "facts": [
+        {
+          "label": "job_id required",
+          "any": [
+            "job_id"
+          ]
+        },
+        {
+          "label": "DuplicateJobError",
+          "any": [
+            "DuplicateJobError"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rq09-cleanup-ttl",
+      "package": "rq",
+      "question": "How does RQ treat a job TTL of 0, a positive number, and a negative number when cleaning up a job?",
+      "answer": "Job.cleanup: ttl 0 deletes the job immediately; a positive ttl sets the job key (and its dependents and dependencies keys) to expire in that many seconds; a negative ttl sets no expiry, so it persists forever.",
+      "facts": [
+        {
+          "label": "0 deletes",
+          "any": [
+            "delet",
+            "immediately"
+          ]
+        },
+        {
+          "label": "positive expires",
+          "any": [
+            "expire"
+          ]
+        },
+        {
+          "label": "negative forever",
+          "any": [
+            "forever",
+            "never expire",
+            "no expiry",
+            "persist"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rq10-job-ids",
+      "package": "rq",
+      "question": "How are RQ job ids generated, and what makes a custom job id valid?",
+      "answer": "By default the id is a uuid4 string, generated lazily. A custom id must be a string matching JOB_ID_PATTERN [A-Za-z0-9_-]+ (validate_job_id), otherwise it is rejected.",
+      "facts": [
+        {
+          "label": "uuid4",
+          "any": [
+            "uuid"
+          ]
+        },
+        {
+          "label": "pattern",
+          "any": [
+            "A-Za-z0-9_-",
+            "letters, digits",
+            "alphanumeric",
+            "hyphen",
+            "underscore"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rq11-statuses",
+      "package": "rq",
+      "question": "What statuses can an RQ job have?",
+      "answer": "JobStatus: created, queued, finished, failed, started, deferred, scheduled, stopped, canceled, rate_limited and ready_to_enqueue.",
+      "facts": [
+        {
+          "label": "rate_limited",
+          "any": [
+            "rate_limited"
+          ]
+        },
+        {
+          "label": "scheduled and deferred",
+          "any": [
+            "deferred[^.]*scheduled|scheduled[^.]*deferred"
+          ]
+        },
+        {
+          "label": "stopped and canceled",
+          "any": [
+            "stopped[^.]*cancel|cancel[^.]*stopped"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rq12-rate-limit",
+      "package": "rq",
+      "question": "How does RQ's RateLimit restrict jobs, and what happens to a job enqueued when the limit is full?",
+      "answer": "RateLimit(key, concurrency) is concurrency-based, not time-based: at most `concurrency` jobs with that key may be queued or executing at once. A job over the limit is saved with status rate_limited in the key's rate_limited sorted set; a Lua script promotes waiting jobs oldest first into free slots (the allowed set) and pushes them onto their queue when a slot is released.",
+      "facts": [
+        {
+          "label": "concurrency",
+          "any": [
+            "concurren"
+          ]
+        },
+        {
+          "label": "rate_limited status",
+          "any": [
+            "rate_limited",
+            "rate-limited",
+            "rate limited"
+          ]
+        },
+        {
+          "label": "oldest first",
+          "any": [
+            "oldest",
+            "first",
+            "FIFO",
+            "order"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rq13-rate-limit-keys",
+      "package": "rq",
+      "question": "Which Redis keys does RQ's rate limit registry use for a rate limit key?",
+      "answer": "rq:rl:{key} is a hash holding the config (concurrency), rq:rl:{key}:allowed is the sorted set of job ids let through, and rq:rl:{key}:rate_limited holds the ones waiting. All keys are tracked in rq:rl-keys.",
+      "facts": [
+        {
+          "label": "allowed set",
+          "any": [
+            ":allowed"
+          ]
+        },
+        {
+          "label": "rate_limited set",
+          "any": [
+            ":rate_limited"
+          ]
+        },
+        {
+          "label": "rl-keys",
+          "any": [
+            "rl-keys"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rq14-commands",
+      "package": "rq",
+      "question": "How do you tell a running RQ worker to shut down or kill its current work horse?",
+      "answer": "rq.command.send_shutdown_command(connection, worker_name) or send_kill_horse_command; commands are JSON published to the worker's pubsub channel rq:pubsub:<worker_name>. Other commands are stop-job and stop-execution.",
+      "facts": [
+        {
+          "label": "send_shutdown_command",
+          "any": [
+            "shutdown"
+          ]
+        },
+        {
+          "label": "kill-horse",
+          "any": [
+            "kill[-_ ]horse"
+          ]
+        },
+        {
+          "label": "pubsub channel",
+          "any": [
+            "pubsub",
+            "publish"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rq15-callbacks",
+      "package": "rq",
+      "question": "How long can an RQ success or failure callback run by default?",
+      "answer": "CALLBACK_TIMEOUT = 60 seconds; Callback(func, timeout=...) overrides it. Callbacks run under the death penalty class and raise JobTimeoutException past the timeout.",
+      "facts": [
+        {
+          "label": "60 s",
+          "any": [
+            "\\b60\\b",
+            "1 ?min",
+            "one minute"
+          ]
+        },
+        {
+          "label": "Callback timeout param",
+          "any": [
+            "timeout"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rq16-cron-scheduler",
+      "package": "rq",
+      "question": "In RQ's CronScheduler, can a job have both an interval and a cron string, and how long does the scheduler sleep at most between checks?",
+      "answer": "No: CronJob raises ValueError if both or neither of interval and cron are given. calculate_sleep_interval sleeps until the next due job, capped at 60 seconds (60 when there are no jobs). An interval job that has never run runs immediately.",
+      "facts": [
+        {
+          "label": "not both",
+          "any": [
+            "ValueError",
+            "not both",
+            "cannot",
+            "can'?t",
+            "either",
+            "exactly one"
+          ]
+        },
+        {
+          "label": "max 60 s",
+          "any": [
+            "\\b60\\b"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rq17-cron-defaults",
+      "package": "rq",
+      "question": "What limits does RQ apply to cron job history and cron scheduler liveness?",
+      "answer": "DEFAULT_CRON_JOB_HISTORY_LIMIT = 1000 spawned job ids, with DEFAULT_CRON_JOB_HISTORY_TTL of 1 year (refreshed on each write). DEFAULT_CRON_SCHEDULER_TTL = 120 s, refreshed on each heartbeat and used to prune dead schedulers.",
+      "facts": [
+        {
+          "label": "1000",
+          "any": [
+            "1[,_ ]?000\\b"
+          ]
+        },
+        {
+          "label": "120 s",
+          "any": [
+            "\\b120\\b"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rq18-intermediate-queue",
+      "package": "rq",
+      "question": "What is RQ's intermediate queue and when is a job stuck in it cleaned up?",
+      "answer": "<queue key>:intermediate holds jobs a worker dequeued but has not yet put in the StartedJobRegistry. IntermediateQueue.cleanup marks a job first seen (a key with 24 h expiry); if it is still not in the started registry more than 1 minute after it was first seen, it is failed with 'Job was stuck in intermediate queue.' and removed.",
+      "facts": [
+        {
+          "label": ":intermediate",
+          "any": [
+            "intermediate"
+          ]
+        },
+        {
+          "label": "1 minute",
+          "any": [
+            "1 ?min",
+            "one minute",
+            "60 ?s",
+            "a minute"
+          ]
+        },
+        {
+          "label": "started registry",
+          "any": [
+            "started"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rq19-maintenance",
+      "package": "rq",
+      "question": "How often does RQ run its maintenance tasks, and how long before a new scheduler takes over from a dead one?",
+      "answer": "DEFAULT_MAINTENANCE_TASK_INTERVAL = 10 * 60 = 600 s (10 minutes); DEFAULT_SCHEDULER_FALLBACK_PERIOD = 120 s.",
+      "facts": [
+        {
+          "label": "10 min",
+          "any": [
+            "10 ?min",
+            "600"
+          ]
+        },
+        {
+          "label": "120 s",
+          "any": [
+            "\\b120\\b",
+            "2 ?min"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rq20-job-decorator",
+      "package": "rq",
+      "question": "How does RQ's @job decorator let you enqueue a function?",
+      "answer": "@job('queue_name', connection=...) wraps the function and adds f.delay(*args, **kwargs) (and f.enqueue, the same) which builds a Queue (queue_class, default Queue) and enqueues the call with the decorator's options; the plain call still runs it directly.",
+      "facts": [
+        {
+          "label": ".delay",
+          "any": [
+            "delay"
+          ]
+        },
+        {
+          "label": "queue name",
+          "any": [
+            "queue"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "huey01-instance-defaults",
+      "package": "huey",
+      "question": "What are the defaults of the Huey constructor for storing results, storing None and using UTC, and what serializer does it use?",
+      "answer": "Huey(name='huey', results=True, store_none=False, utc=True, immediate=False, compression=False). The default Serializer uses pickle; compression=True uses gzip, or zlib with use_zlib=True.",
+      "facts": [
+        {
+          "label": "results=True",
+          "any": [
+            "results"
+          ]
+        },
+        {
+          "label": "store_none False",
+          "any": [
+            "store_none"
+          ]
+        },
+        {
+          "label": "utc True",
+          "any": [
+            "utc"
+          ]
+        },
+        {
+          "label": "pickle",
+          "any": [
+            "pickle"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "huey02-retries",
+      "package": "huey",
+      "question": "How do you give a huey task automatic retries with a delay, and how does retry_backoff change the delay?",
+      "answer": "@huey.task(retries=N, retry_delay=SECONDS, retry_backoff=FACTOR); the defaults are 0 retries and 0 delay. On a failure with retries left, _requeue_task decrements retries and schedules the task retry_delay seconds out; with retry_backoff the delay is multiplied by that factor after each retry.",
+      "facts": [
+        {
+          "label": "retries=",
+          "any": [
+            "retries"
+          ]
+        },
+        {
+          "label": "retry_delay",
+          "any": [
+            "retry_delay"
+          ]
+        },
+        {
+          "label": "multiplied by backoff",
+          "any": [
+            "multipl",
+            "\\*=",
+            "grows",
+            "geometric",
+            "exponential"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "huey03-immediate",
+      "package": "huey",
+      "question": "What is huey's immediate mode, what storage does it use, and can a consumer run with it?",
+      "answer": "immediate=True executes tasks synchronously in the calling process, for debugging and tests. With immediate_use_memory=True (default) it switches to an in-memory storage. Consumer.start raises ConfigurationError if huey.immediate is enabled.",
+      "facts": [
+        {
+          "label": "synchronous",
+          "any": [
+            "synchron",
+            "in the (same|calling)",
+            "inline",
+            "right away",
+            "immediately"
+          ]
+        },
+        {
+          "label": "memory storage",
+          "any": [
+            "memory"
+          ]
+        },
+        {
+          "label": "consumer refuses",
+          "any": [
+            "ConfigurationError",
+            "refus",
+            "cannot",
+            "can'?t",
+            "raises",
+            "error"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "huey04-djhuey-immediate",
+      "package": "huey",
+      "question": "In huey's Django integration, how is immediate mode set if settings.HUEY does not mention it, and what queue name is used by default?",
+      "answer": "If 'immediate' is not in the HUEY dict it is set to settings.DEBUG. Without a name, default_queue_name() uses the default database's NAME, falling back to 'huey'; with no HUEY setting at all it builds RedisHuey(default_queue_name()).",
+      "facts": [
+        {
+          "label": "DEBUG",
+          "any": [
+            "DEBUG"
+          ]
+        },
+        {
+          "label": "database NAME",
+          "any": [
+            "DATABASES",
+            "database"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "huey05-consumer-defaults",
+      "package": "huey",
+      "question": "What are huey consumer defaults for workers, worker type and polling, and how does polling slow down when the queue is empty?",
+      "answer": "workers=1, worker_type='thread', initial_delay=0.1 s, backoff=1.15, max_delay=10 s. An idle worker sleeps delay seconds and then multiplies delay by backoff, up to max_delay; it resets to the initial delay once a task arrives. backoff must be at least 1.",
+      "facts": [
+        {
+          "label": "1 worker",
+          "any": [
+            "\\b1\\b",
+            "one|single"
+          ]
+        },
+        {
+          "label": "thread",
+          "any": [
+            "thread"
+          ]
+        },
+        {
+          "label": "0.1 initial",
+          "any": [
+            "0\\.1"
+          ]
+        },
+        {
+          "label": "1.15 backoff",
+          "any": [
+            "1\\.15"
+          ]
+        },
+        {
+          "label": "10 s max",
+          "any": [
+            "\\b10\\b"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "huey06-scheduler-interval",
+      "package": "huey",
+      "question": "How often does huey's scheduler run, what values are allowed, and how often are periodic tasks checked?",
+      "answer": "scheduler_interval defaults to 1 s and is clamped to 1-60; it must divide 60 evenly (1, 2, 3, 4, 5, 6, 10, 12, ...) or ConfigurationError is raised. Periodic tasks are checked every 60 seconds (periodic_task_seconds).",
+      "facts": [
+        {
+          "label": "1 s default",
+          "any": [
+            "\\b1 ?(s\\b|sec)",
+            "once (a|per|every) second",
+            "every second"
+          ]
+        },
+        {
+          "label": "divides 60",
+          "any": [
+            "divi",
+            "factor of 60",
+            "multiple"
+          ]
+        },
+        {
+          "label": "periodic every 60 s",
+          "any": [
+            "60"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "huey07-health-check",
+      "package": "huey",
+      "question": "What does huey's worker health check do, how often, and what option depends on it?",
+      "answer": "With check_worker_health=True (default) the consumer checks every health_check_interval (10 s) and restarts any worker that died. max_tasks (recycle a worker after N tasks) requires check_worker_health, otherwise ConfigurationError.",
+      "facts": [
+        {
+          "label": "10 s",
+          "any": [
+            "\\b10\\b"
+          ]
+        },
+        {
+          "label": "restart dead workers",
+          "any": [
+            "restart",
+            "respawn",
+            "replac"
+          ]
+        },
+        {
+          "label": "max_tasks",
+          "any": [
+            "max_tasks"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "huey08-signals",
+      "package": "huey",
+      "question": "How do you stop a huey consumer gracefully versus immediately, and how do you restart it?",
+      "answer": "graceful_signal defaults to 'INT': SIGINT is the graceful stop (running tasks finish) and SIGTERM stops immediately. With graceful_signal='TERM' the two swap. SIGHUP restarts the consumer.",
+      "facts": [
+        {
+          "label": "SIGINT graceful by default",
+          "any": [
+            "SIGINT",
+            "\\bINT\\b"
+          ]
+        },
+        {
+          "label": "SIGTERM",
+          "any": [
+            "SIGTERM",
+            "\\bTERM\\b"
+          ]
+        },
+        {
+          "label": "SIGHUP restart",
+          "any": [
+            "SIGHUP",
+            "\\bHUP\\b"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "huey09-lock-task",
+      "package": "huey",
+      "question": "How does huey's lock_task work, what key does it use, and what happens when the lock is already held?",
+      "answer": "huey.lock_task(name) returns a TaskLock usable as a decorator or context manager. It does put_if_empty on '<huey name>.lock.<name>' (optional ttl) and deletes the key on exit. If the key exists it raises TaskLockedException, and the task is not run (SIGNAL_LOCKED).",
+      "facts": [
+        {
+          "label": "put_if_empty",
+          "any": [
+            "put_if_empty",
+            "set if (empty|not exists)",
+            "SETNX",
+            "only if"
+          ]
+        },
+        {
+          "label": "key name",
+          "any": [
+            "\\.lock\\."
+          ]
+        },
+        {
+          "label": "TaskLockedException",
+          "any": [
+            "TaskLockedException"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "huey10-flush-locks",
+      "package": "huey",
+      "question": "If a huey consumer was killed while a task held a lock, how do you clear the stale lock?",
+      "answer": "Start the consumer with flush_locks=True (-f/--flush-locks) or extra_locks='a,b' (-L); the consumer then calls flush_locks, which deletes the registered and named lock keys before starting. huey.flush_locks(*names) does the same from code.",
+      "facts": [
+        {
+          "label": "flush_locks",
+          "any": [
+            "flush[_-]locks"
+          ]
+        },
+        {
+          "label": "extra_locks",
+          "any": [
+            "extra[_-]locks",
+            "-L\\b"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "huey11-rate-limit",
+      "package": "huey",
+      "question": "How does huey's rate_limit work, and what happens to a task that goes over it?",
+      "answer": "huey.rate_limit(name, limit, per, retry=True) is a fixed-window counter: the window is int(now) // per, a counter key '<name>.rl.<name>' is reset when the window changes and incremented per call. Over the limit it raises RateLimitExceeded; if retry is set (or the task has retries) the task is rescheduled after the time until the window resets (or retry_delay).",
+      "facts": [
+        {
+          "label": "fixed window",
+          "any": [
+            "fixed[- ]window",
+            "window"
+          ]
+        },
+        {
+          "label": "RateLimitExceeded",
+          "any": [
+            "RateLimitExceeded"
+          ]
+        },
+        {
+          "label": "retried after window reset",
+          "any": [
+            "reset",
+            "until the (next )?window",
+            "retr"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "huey12-crontab",
+      "package": "huey",
+      "question": "In huey's crontab(), how are days of the week numbered, and what syntax does it accept?",
+      "answer": "day_of_week: 0 = Sunday, 6 = Saturday (7 is also accepted as Sunday). Each field accepts '*', '*/n' (every n), 'm-n' ranges and 'm,n' lists; strict=True raises ValueError for anything else.",
+      "facts": [
+        {
+          "label": "0 = Sunday",
+          "any": [
+            "0\\s*(=|is|for|means)\\s*sunday",
+            "sunday\\s*(=|is)\\s*0"
+          ]
+        },
+        {
+          "label": "*/n",
+          "any": [
+            "\\*/n",
+            "\\*/\\d"
+          ]
+        },
+        {
+          "label": "ranges and lists",
+          "any": [
+            "m-n",
+            "range"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "huey13-revoke",
+      "package": "huey",
+      "question": "What is the difference between revoking a huey task with revoke_once and with revoke_until?",
+      "answer": "revoke(task, revoke_until=None, revoke_once=False) stores (revoke_until, revoke_once) under the task's revoke id. revoke_once skips only the next execution and then the task is restored. revoke_until keeps it revoked until that time, after which it is restored. With neither, it stays revoked until restore().",
+      "facts": [
+        {
+          "label": "revoke_once skips one run",
+          "any": [
+            "once",
+            "next (execution|run)",
+            "single"
+          ]
+        },
+        {
+          "label": "revoke_until until a time",
+          "any": [
+            "until"
+          ]
+        },
+        {
+          "label": "restore",
+          "any": [
+            "restor"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "huey14-expires",
+      "package": "huey",
+      "question": "What does the expires option on a huey task do?",
+      "answer": "expires (seconds or datetime) is resolved to an absolute expires_resolved time at enqueue. When the consumer is about to execute a task whose expires_resolved is in the past, it does not run it: it logs 'expired, not executing' and emits SIGNAL_EXPIRED.",
+      "facts": [
+        {
+          "label": "not executed after time",
+          "any": [
+            "not (be )?(run|execut)",
+            "skip",
+            "won'?t (run|execut)",
+            "doesn'?t (run|execut)",
+            "discard"
+          ]
+        },
+        {
+          "label": "signal expired",
+          "any": [
+            "expired"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "huey15-results",
+      "package": "huey",
+      "question": "How do you get a huey task's result, and what does blocking polling look like by default?",
+      "answer": "Calling the task returns a Result; result.get(blocking=False, timeout=None, backoff=1.15, max_delay=1.0, revoke_on_timeout=False, preserve=False). Blocking polls with a delay growing by 1.15x up to 1 s. If the task failed, get raises TaskException. huey.result(id) does the same by id.",
+      "facts": [
+        {
+          "label": "Result.get",
+          "any": [
+            "get\\(",
+            "\\.get\\b"
+          ]
+        },
+        {
+          "label": "1.15 backoff",
+          "any": [
+            "1\\.15"
+          ]
+        },
+        {
+          "label": "TaskException",
+          "any": [
+            "TaskException"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "huey16-intermediate-errors",
+      "package": "huey",
+      "question": "When a huey task fails but still has retries left, is the error stored and is on_error run?",
+      "answer": "Only if store_intermediate_errors is True (the default, for backwards compatibility): then each failed attempt's error is stored as the result and on_error runs. With it False, the error is withheld until retries are exhausted. A task with no retries left always surfaces the error.",
+      "facts": [
+        {
+          "label": "store_intermediate_errors",
+          "any": [
+            "store_intermediate_errors"
+          ]
+        },
+        {
+          "label": "default True",
+          "any": [
+            "true",
+            "default"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "huey17-cancel-execution",
+      "package": "huey",
+      "question": "How can a huey pre-execute hook stop a task from running, and does that task get retried?",
+      "answer": "Raise CancelExecution from a @huey.pre_execute() hook; the task is skipped and SIGNAL_CANCELED is sent. Raised from inside the task, CancelExecution(retry=True) forces a retry, retry=False aborts it, and retry=None retries only if the task still has retries.",
+      "facts": [
+        {
+          "label": "CancelExecution",
+          "any": [
+            "CancelExecution"
+          ]
+        },
+        {
+          "label": "pre_execute",
+          "any": [
+            "pre_execute",
+            "pre-execute"
+          ]
+        },
+        {
+          "label": "retry flag",
+          "any": [
+            "retry"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "huey18-sql-storage",
+      "package": "huey",
+      "question": "What does huey's SQL storage use under the hood and in what order does it dequeue tasks?",
+      "answer": "contrib/sql_huey.py SqlStorage uses peewee models (KV, Schedule, Task, Counter) on any peewee database or connection string. Dequeue picks the Task row with the highest priority first, then the lowest id (order_by priority desc, id).",
+      "facts": [
+        {
+          "label": "peewee",
+          "any": [
+            "peewee"
+          ]
+        },
+        {
+          "label": "priority then id",
+          "any": [
+            "priority"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "huey19-minihuey",
+      "package": "huey",
+      "question": "What is MiniHuey and how does it differ from a normal huey consumer?",
+      "answer": "contrib/mini.py MiniHuey is a minimal huey-like API built on gevent that runs inside the parent process: tasks run on a gevent Pool and periodic tasks (crontab) are checked every interval (default 1 s) by a greenlet. There is no separate consumer or storage.",
+      "facts": [
+        {
+          "label": "gevent",
+          "any": [
+            "gevent"
+          ]
+        },
+        {
+          "label": "in-process",
+          "any": [
+            "(same|parent|own) process",
+            "in-process",
+            "within",
+            "inside"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "huey20-periodic",
+      "package": "huey",
+      "question": "How do huey periodic tasks decide when to run, and are their results stored?",
+      "answer": "@huey.periodic_task(crontab(...)) creates a PeriodicTask whose validate_datetime is the crontab test. The consumer's scheduler calls read_periodic(now) about once a minute and enqueues the tasks whose test matches. Results of PeriodicTask runs are not stored in the result store.",
+      "facts": [
+        {
+          "label": "crontab",
+          "any": [
+            "crontab"
+          ]
+        },
+        {
+          "label": "checked per minute",
+          "any": [
+            "minute",
+            "60"
+          ]
+        },
+        {
+          "label": "results not stored",
+          "any": [
+            "not (be )?stored",
+            "aren'?t stored",
+            "no result",
+            "not saved",
+            "isn'?t stored",
+            "doesn'?t store"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "arq01-concurrency",
+      "package": "arq",
+      "question": "How many jobs does an arq worker run at the same time by default, and how many job ids does it read from the queue each time it polls?",
+      "answer": "Worker(max_jobs=10) by default. queue_read_limit defaults to max(max_jobs * 5, 100), so 100 with the defaults.",
+      "facts": [
+        {
+          "label": "max_jobs 10",
+          "any": [
+            "\\b10\\b"
+          ]
+        },
+        {
+          "label": "read limit 100",
+          "any": [
+            "\\b100\\b"
+          ]
+        },
+        {
+          "label": "max_jobs*5",
+          "any": [
+            "\\*\\s*5",
+            "5\\s*(x|\\*|×)",
+            "five times",
+            "times 5"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "arq02-timeout-results",
+      "package": "arq",
+      "question": "What are an arq worker's default job timeout and result retention, and how can one function override them?",
+      "answer": "job_timeout defaults to 300 s and keep_result to 3600 s (1 hour). Wrap the coroutine with arq.worker.func(coroutine, timeout=..., keep_result=..., keep_result_forever=..., max_tries=...); keep_result=0 means the result is not kept.",
+      "facts": [
+        {
+          "label": "300 s",
+          "any": [
+            "\\b300\\b",
+            "5 ?min"
+          ]
+        },
+        {
+          "label": "3600 s",
+          "any": [
+            "3600",
+            "1 ?h",
+            "one hour",
+            "an hour"
+          ]
+        },
+        {
+          "label": "func()",
+          "any": [
+            "\\bfunc\\b"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "arq03-unique-job",
+      "package": "arq",
+      "question": "How do you stop the same arq job from being enqueued twice, and what does enqueue_job return when it is a duplicate?",
+      "answer": "Pass _job_id. enqueue_job WATCHes the job key and returns None if arq:job:<id> or the result key arq:result:<id> already exists (or if a WatchError shows it was enqueued meanwhile).",
+      "facts": [
+        {
+          "label": "_job_id",
+          "any": [
+            "_job_id",
+            "job_id"
+          ]
+        },
+        {
+          "label": "returns None",
+          "any": [
+            "None"
+          ]
+        },
+        {
+          "label": "result key also checked",
+          "any": [
+            "result"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "arq04-retry",
+      "package": "arq",
+      "question": "How does an arq job function ask to be run again later, and how many tries does a job get by default?",
+      "answer": "Raise arq.worker.Retry(defer=seconds or timedelta); the job is re-scored to run after that delay. Each run increments the job's try counter, and the worker's max_tries defaults to 5 (func(max_tries=...) overrides it); past that the job fails with 'max N retries exceeded'.",
+      "facts": [
+        {
+          "label": "Retry exception",
+          "any": [
+            "Retry\\b"
+          ]
+        },
+        {
+          "label": "defer",
+          "any": [
+            "defer"
+          ]
+        },
+        {
+          "label": "5 tries",
+          "any": [
+            "\\b5\\b",
+            "five"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "arq05-in-progress",
+      "package": "arq",
+      "question": "How does arq prevent two workers from running the same job at once?",
+      "answer": "In start_jobs the worker WATCHes arq:in-progress:<job_id>, checks it does not exist and the job's score is due, then in a MULTI sets the in-progress key with psetex for in_progress_timeout_s (the longest function timeout + 10 s). If the transaction fails (WatchError) another worker got it.",
+      "facts": [
+        {
+          "label": "in-progress key",
+          "any": [
+            "in-progress",
+            "in_progress"
+          ]
+        },
+        {
+          "label": "watch/transaction",
+          "any": [
+            "watch",
+            "multi",
+            "transaction"
+          ]
+        },
+        {
+          "label": "timeout + 10 s",
+          "any": [
+            "\\+\\s*10",
+            "10 ?s\\b",
+            "10 seconds"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "arq06-expiry",
+      "package": "arq",
+      "question": "When does an arq job expire if no worker runs it, and what happens if a worker picks up an expired job?",
+      "answer": "The job key is set with an expiry of _expires if given, else the defer time plus expires_extra_ms (86,400,000 ms = 1 day). If the job data is gone when a worker runs it, the job fails with JobExecutionFailed('job expired').",
+      "facts": [
+        {
+          "label": "1 day",
+          "any": [
+            "86[,_]?400",
+            "24 ?h",
+            "one day",
+            "1 day",
+            "a day"
+          ]
+        },
+        {
+          "label": "plus defer",
+          "any": [
+            "defer"
+          ]
+        },
+        {
+          "label": "fails as expired",
+          "any": [
+            "expired"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "arq07-retry-key",
+      "package": "arq",
+      "question": "Where does arq keep a job's try counter and how long does that key live?",
+      "answer": "In arq:retry:<job_id> (retry_key_prefix), incremented with INCR at the start of each run and set to expire after 88,400 seconds.",
+      "facts": [
+        {
+          "label": "arq:retry:",
+          "any": [
+            "arq:retry",
+            "retry_key_prefix"
+          ]
+        },
+        {
+          "label": "88400 s",
+          "any": [
+            "88[,_ ]?400"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "arq08-abort",
+      "package": "arq",
+      "question": "How do you abort a running arq job, and what must be enabled on the worker for it to work?",
+      "answer": "Call await job.abort(); it adds the id to the arq:abort sorted set (and moves a deferred job to run now). The worker must be created with allow_abort_jobs=True; it then reads the set each poll and cancels the matching asyncio task. Entries older than 60 s are removed.",
+      "facts": [
+        {
+          "label": "allow_abort_jobs",
+          "any": [
+            "allow_abort_jobs"
+          ]
+        },
+        {
+          "label": "arq:abort sorted set",
+          "any": [
+            "arq:abort",
+            "abort_jobs_ss",
+            "sorted set"
+          ]
+        },
+        {
+          "label": "cancels task",
+          "any": [
+            "cancel"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "arq09-health",
+      "package": "arq",
+      "question": "How does an arq worker report its health, under which key and how often?",
+      "answer": "record_health writes a line like 'j_complete=… j_failed=… j_retried=… j_ongoing=… queued=…' to <queue_name>:health-check (default arq:queue:health-check) every health_check_interval (3600 s by default), with a TTL of interval + 1 s. `arq --check` reads it and exits 0 or 1.",
+      "facts": [
+        {
+          "label": "health-check key",
+          "any": [
+            "health-check",
+            "health_check_key"
+          ]
+        },
+        {
+          "label": "3600 s",
+          "any": [
+            "3600",
+            "1 ?h",
+            "one hour",
+            "an hour"
+          ]
+        },
+        {
+          "label": "counts",
+          "any": [
+            "j_complete",
+            "complete"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "arq10-signals",
+      "package": "arq",
+      "question": "What does an arq worker do on SIGTERM by default, and how can it be told to let running jobs finish first?",
+      "answer": "By default handle_sig cancels every running task and the main task straight away; cancelled jobs are retried later (retry_jobs). With job_completion_wait set, handle_sig_wait_for_completion stops picking new jobs (allow_pick_jobs False), waits up to that many seconds for tasks, then cancels the rest.",
+      "facts": [
+        {
+          "label": "cancels tasks",
+          "any": [
+            "cancel"
+          ]
+        },
+        {
+          "label": "job_completion_wait",
+          "any": [
+            "job_completion_wait"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "arq11-cron",
+      "package": "arq",
+      "question": "How do arq cron jobs avoid running twice when several workers are up?",
+      "answer": "cron(..., unique=True) is the default: each run is enqueued with job id '<name>:<run time in ms>', so only one worker's enqueue succeeds. A fixed job_id can be given instead. After a cron job ends its in-progress key is kept for 60 s (keep_cronjob_progress).",
+      "facts": [
+        {
+          "label": "unique default",
+          "any": [
+            "unique"
+          ]
+        },
+        {
+          "label": "job id from name and time",
+          "any": [
+            "name[^.]{0,40}time",
+            "timestamp",
+            "run time",
+            "next_run",
+            ":\\{?to_unix_ms",
+            "job id"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "arq12-cron-defaults",
+      "package": "arq",
+      "question": "What are the defaults of arq's cron() for max tries, result keeping and running at startup, and which microsecond does it fire on?",
+      "answer": "max_tries=1 (no retries), keep_result=0 (results not kept), run_at_startup=False, unique=True, and microsecond=123_456.",
+      "facts": [
+        {
+          "label": "max_tries 1",
+          "any": [
+            "max_tries\\D{0,10}1\\b",
+            "\\b1 (try|attempt)",
+            "one (try|attempt)",
+            "no retr",
+            "not retried"
+          ]
+        },
+        {
+          "label": "keep_result 0",
+          "any": [
+            "keep_result\\D{0,10}0\\b",
+            "not kept",
+            "isn'?t kept",
+            "doesn'?t keep"
+          ]
+        },
+        {
+          "label": "run_at_startup False",
+          "any": [
+            "run_at_startup"
+          ]
+        },
+        {
+          "label": "123456",
+          "any": [
+            "123[,_ ]?456"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "arq13-redis-settings",
+      "package": "arq",
+      "question": "What are arq's default Redis connection settings, and how do you turn on TLS or pick a database from a DSN?",
+      "answer": "RedisSettings: host localhost, port 6379, database 0, conn_timeout 1, conn_retries 5, conn_retry_delay 1. RedisSettings.from_dsn accepts redis://, rediss:// (sets ssl=True) or unix://; the database comes from ?db=N or the path, e.g. redis://localhost:6379/1.",
+      "facts": [
+        {
+          "label": "6379",
+          "any": [
+            "6379"
+          ]
+        },
+        {
+          "label": "rediss for TLS",
+          "any": [
+            "rediss"
+          ]
+        },
+        {
+          "label": "db from dsn",
+          "any": [
+            "db=",
+            "path",
+            "/\\d"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "arq14-keys",
+      "package": "arq",
+      "question": "What Redis keys does arq use for the default queue, job data and job results?",
+      "answer": "The default queue is the sorted set 'arq:queue' (score = run time in ms). Job data lives at 'arq:job:<id>' and results at 'arq:result:<id>' (plus arq:in-progress:, arq:retry: and arq:abort).",
+      "facts": [
+        {
+          "label": "arq:queue",
+          "any": [
+            "arq:queue"
+          ]
+        },
+        {
+          "label": "arq:job:",
+          "any": [
+            "arq:job:"
+          ]
+        },
+        {
+          "label": "arq:result:",
+          "any": [
+            "arq:result:"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "arq15-burst",
+      "package": "arq",
+      "question": "What does burst mode do in arq, and how can you cap how many jobs a burst run processes?",
+      "answer": "With burst=True (or `arq --burst`) the worker exits once the queue is empty, after waiting for running tasks. max_burst_jobs (default -1, disabled) caps how many jobs it starts in burst mode.",
+      "facts": [
+        {
+          "label": "exits when empty",
+          "any": [
+            "empty",
+            "no (more )?jobs",
+            "exit",
+            "stop"
+          ]
+        },
+        {
+          "label": "max_burst_jobs",
+          "any": [
+            "max_burst_jobs"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "arq16-status",
+      "package": "arq",
+      "question": "What statuses can an arq Job report and how is 'deferred' told apart from 'queued'?",
+      "answer": "JobStatus: deferred, queued, in_progress, complete, not_found. Job.status checks the result key (complete), the in-progress key (in_progress), then the queue score: deferred if the score (run time) is still in the future, queued if it has passed; otherwise not_found.",
+      "facts": [
+        {
+          "label": "five statuses",
+          "any": [
+            "not_found"
+          ]
+        },
+        {
+          "label": "in_progress/complete",
+          "any": [
+            "in_progress",
+            "complete"
+          ]
+        },
+        {
+          "label": "deferred = future score",
+          "any": [
+            "future",
+            "score",
+            "not yet",
+            "later",
+            "hasn'?t (been )?reached",
+            "not reached"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "arq17-serializer",
+      "package": "arq",
+      "question": "How does arq serialize jobs by default and what is stored in a job?",
+      "answer": "With pickle by default (job_serializer/job_deserializer can replace it). serialize_job stores a dict {'t': job_try, 'f': function name, 'a': args, 'k': kwargs, 'et': enqueue time in ms}.",
+      "facts": [
+        {
+          "label": "pickle",
+          "any": [
+            "pickle"
+          ]
+        },
+        {
+          "label": "function, args, kwargs, try, enqueue time",
+          "any": [
+            "enqueue[_ ]time",
+            "job_try",
+            "\\bet\\b"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "arq18-cli",
+      "package": "arq",
+      "question": "Which options does the arq command line accept and what do --check and --watch do?",
+      "answer": "arq WORKER_SETTINGS [--burst/--no-burst] [--check] [--watch DIR] [-v] [--custom-log-dict]. --check runs a health check and exits with its code; --watch reloads the worker when files in the directory change (needs watchfiles).",
+      "facts": [
+        {
+          "label": "--check health",
+          "any": [
+            "--check"
+          ]
+        },
+        {
+          "label": "--watch reload",
+          "any": [
+            "--watch"
+          ]
+        },
+        {
+          "label": "--burst",
+          "any": [
+            "--burst"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "arq19-result-wait",
+      "package": "arq",
+      "question": "How do you wait for an arq job's result from the enqueuing side, and how often does it poll Redis?",
+      "answer": "await job.result(timeout=None, poll_delay=0.5): it polls the result key every 0.5 s by default (pole_delay is a deprecated spelling) and raises the job's exception if it failed; timeout=None waits forever.",
+      "facts": [
+        {
+          "label": "job.result",
+          "any": [
+            "result\\("
+          ]
+        },
+        {
+          "label": "0.5 s",
+          "any": [
+            "0\\.5",
+            "half a second",
+            "500 ?ms"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "arq20-cancel-retry",
+      "package": "arq",
+      "question": "If an arq job's task is cancelled (for example on worker shutdown) rather than aborted, what happens to it?",
+      "answer": "With retry_jobs=True (default), asyncio.CancelledError or RetryJob is logged as 'cancelled, will be run again' and counted as retried, so the job runs again later. A cancellation caused by abort is recorded as a failure instead.",
+      "facts": [
+        {
+          "label": "run again",
+          "any": [
+            "run again",
+            "retr",
+            "re-?queued",
+            "re-?run"
+          ]
+        },
+        {
+          "label": "retry_jobs",
+          "any": [
+            "retry_jobs"
+          ]
+        }
       ]
     }
   ]

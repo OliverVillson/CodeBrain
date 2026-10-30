@@ -245,20 +245,30 @@ def check_database(url: str) -> None:
 async def cmd_qa(args: argparse.Namespace, out: Path, llm: LLM) -> dict[str, Any]:
     root = Path(args.qa_codebase).expanduser().resolve()
     questions = qa.load_questions(Path(args.qa_questions).expanduser())
+    name = root.name
+    libs: set[str] = set()
     if args.qa_haystack:
-        # Other libraries now share the tree, so say which package the question is about.
-        questions = [
-            dataclasses.replace(q, question=f"About the {root.name} package: {q.question}")
-            for q in questions
-        ]
         root = qa.build_haystack_codebase(
             root,
             args.qa_haystack,
             Path(args.cache).expanduser(),
             args.qa_haystack_tokens,
-            llm.count_tokens,
-            out / f"codebase-{root.name}-haystack",
+            # Not the model's tokenizer: the same files must be picked whatever the model,
+            # because questions are written against them.
+            lambda text: len(text) // 4,
+            out / f"codebase-{name}-haystack",
         )
+        libs = {p.name for p in (root / "libs").iterdir() if p.is_dir()}
+    asked = [q for q in questions if q.package is None or q.package in libs]
+    if len(asked) < len(questions):
+        log(f"qa: skipping {len(questions) - len(asked)} questions about libraries not mixed in")
+    questions = asked
+    if args.qa_haystack:
+        # Other libraries now share the tree, so say which package the question is about.
+        questions = [
+            dataclasses.replace(q, question=f"About the {q.package or name} package: {q.question}")
+            for q in questions
+        ]
     files = qa.codebase_files(root)
     codebase = qa.render_codebase(files)
     codebase_tokens = llm.count_tokens(codebase)
@@ -342,6 +352,7 @@ async def cmd_qa(args: argparse.Namespace, out: Path, llm: LLM) -> dict[str, Any
         "k": args.qa_k,
         "warm_cache": args.qa_warm_cache,
         "questions": [q.id for q in questions],
+        "packages": {q.id: q.package or name for q in questions},
         "ingest": dataclasses.asdict(stats),
         "summary": {m: qa.summarize(answers, m) for m in qa.MODES},
         "answers": [qa.answer_to_json(a) for a in answers],

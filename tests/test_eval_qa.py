@@ -12,10 +12,18 @@ from codebrain.eval.__main__ import amain, parser
 
 def test_reference_answers_pass_their_own_facts() -> None:
     questions = qa.load_questions(qa.DEFAULT_QUESTIONS)
-    assert len(questions) == 10
-    assert len({q.id for q in questions}) == 10
+    assert len(questions) == 100
+    assert len({q.id for q in questions}) == 100
     for q in questions:
         assert qa.grade(q.answer, q) == [], q.id
+
+
+def test_library_questions_name_a_default_haystack_package() -> None:
+    names = {spec.split("@")[0].rstrip("/").split("/")[-1] for spec in qa.DEFAULT_HAYSTACK}
+    by_package: dict[str | None, int] = {}
+    for q in qa.load_questions(qa.DEFAULT_QUESTIONS):
+        by_package[q.package] = by_package.get(q.package, 0) + 1
+    assert by_package == {None: 40, **{n: 20 for n in names}}
 
 
 def test_distractor_answer_fails() -> None:
@@ -62,7 +70,8 @@ def test_fake_run_writes_report(database_url: str, tmp_path: Path) -> None:
     [run] = list(tmp_path.iterdir())
     res = json.loads((run / "results.json").read_text())["qa"]
     normal, codebrain = res["summary"]["normal"], res["summary"]["codebrain"]
-    assert normal["questions"] == codebrain["questions"] == 10
+    # Without --qa-haystack only the tidepool questions are asked.
+    assert normal["questions"] == codebrain["questions"] == 40
     assert res["ingest"]["units"] > 50
     # CodeBrain's context is capped by the recall budget; normal sends everything.
     assert codebrain["mean_context_tokens"] <= res["budget"] < normal["mean_context_tokens"]

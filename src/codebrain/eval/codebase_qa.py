@@ -71,6 +71,8 @@ class Question:
     question: str
     answer: str
     facts: tuple[Fact, ...]
+    package: str | None = None
+    """A haystack library the question is about; ``None`` means the codebase itself."""
 
 
 def load_questions(path: Path) -> list[Question]:
@@ -81,6 +83,7 @@ def load_questions(path: Path) -> list[Question]:
             question=q["question"],
             answer=q["answer"],
             facts=tuple(Fact(f["label"], tuple(f["any"])) for f in q["facts"]),
+            package=q.get("package"),
         )
         for q in data["questions"]
     ]
@@ -447,6 +450,24 @@ def render_section(r: dict[str, Any]) -> list[str]:
         f"| total tokens | {pair('total_tokens', lambda x: f'{x:,}')} |",
         f"| mean context tokens | {pair('mean_context_tokens', lambda x: f'{x:,.0f}')} |",
         "",
+    ]
+    packages = r.get("packages", {})
+    if len(set(packages.values())) > 1:
+        lines += [
+            "| package | questions | normal correct | codebrain correct |",
+            "| --- | --- | --- | --- |",
+        ]
+        for pkg in dict.fromkeys(packages.values()):
+            ids = {q for q, p in packages.items() if p == pkg}
+            right = {
+                m: sum(
+                    a["correct"] for a in r["answers"] if a["mode"] == m and a["question_id"] in ids
+                )
+                for m in MODES
+            }
+            lines.append(f"| {pkg} | {len(ids)} | {right['normal']} | {right['codebrain']} |")
+        lines.append("")
+    lines += [
         "| question | normal | codebrain | normal s | codebrain s (recall) | normal tokens "
         "| codebrain tokens |",
         "| --- | --- | --- | --- | --- | --- | --- |",
