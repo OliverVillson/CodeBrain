@@ -19,6 +19,35 @@ class ChunkingParams(BaseModel):
 
     tau_min: int = 64
     tau_max: int = 1200
+    max_file_bytes: int = 1_000_000
+    prompt_globs: list[str] = [
+        "prompts/**",
+        "**/prompts/**",
+        "**/*.prompt",
+        "**/*.prompt.md",
+        "**/CLAUDE.md",
+        "**/AGENTS.md",
+    ]
+    exclude_globs: list[str] = [
+        "**/node_modules/**",
+        "**/.venv/**",
+        "**/venv/**",
+        "**/vendor/**",
+        "**/dist/**",
+        "**/build/**",
+        "**/target/**",
+        "**/*.min.js",
+        "**/*_pb2.py",
+    ]
+
+
+class SummaryParams(BaseModel):
+    """Sketch §3: ``heuristic`` (no model), ``anthropic`` or ``anthropic:<model id>``."""
+
+    model: str = "heuristic"
+    effort: str = "low"
+    max_tokens: int = 2048
+    concurrency: int = 4
 
 
 class EmbeddingParams(BaseModel):
@@ -28,6 +57,7 @@ class EmbeddingParams(BaseModel):
     code_model: str = "unset-code-model"
     dim: int = 1024
     prefilter_dim: int = 256
+    batch_size: int = 64
 
 
 class ClassificationParams(BaseModel):
@@ -103,6 +133,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql://codebrain:codebrain@localhost:5432/codebrain"
 
     chunking: ChunkingParams = ChunkingParams()
+    summary: SummaryParams = SummaryParams()
     embedding: EmbeddingParams = EmbeddingParams()
     classification: ClassificationParams = ClassificationParams()
     graph: GraphParams = GraphParams()
