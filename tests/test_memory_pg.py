@@ -20,6 +20,8 @@ from codebrain.models import (
     Span,
     Unit,
     UnitKind,
+    UnitVector,
+    VectorView,
     code_unit_id,
 )
 from codebrain.store import repo
@@ -130,3 +132,38 @@ def test_paging_writes_session_turn_units(conn: psycopg.Connection, store: PgMem
         "SELECT count(*) FROM unit_vectors WHERE unit_id = %s", (unit.id,)
     ).fetchone()
     assert row and row[0] == 1
+
+
+def test_nearest_skips_deprecated_tombstoned_and_other_sessions(
+    conn: psycopg.Connection, store: PgMemoryStore
+) -> None:
+    embedder = BagOfWordsEmbedder()
+    vec = [1.0] + [0.0] * 63
+
+    def add(**kw: object) -> str:
+        unit = Unit.model_validate({"kind": UnitKind.EPISODE, "repo": REPO, "text": "t", **kw})
+        repo.upsert_unit(conn, unit)
+        repo.upsert_vector(
+            conn,
+            UnitVector(
+                unit_id=unit.id, view=VectorView.SUMMARY, model=embedder.model, embedding=vec
+            ),
+        )
+        return unit.id
+
+    add(namespace=Namespace.PROJECT, validity=VALIDITY_DEPRECATED)
+    add(namespace=Namespace.PROJECT, labels={"tombstoned": True})
+    mine = add(namespace=Namespace.SESSION, session_id="s1")
+    add(namespace=Namespace.SESSION, session_id="s2")
+
+    def near(namespace: Namespace, session_id: str | None = None) -> str | None:
+        hit = store.nearest(
+            UnitKind.EPISODE, embedder.model, vec, REPO, namespace=namespace, session_id=session_id
+        )
+        return hit[0].id if hit else None
+
+    assert near(Namespace.PROJECT) is None
+    assert near(Namespace.SESSION, "s1") == mine
+    assert near(Namespace.SESSION, "s3") is None
+    live = add(namespace=Namespace.PROJECT, validity=0.3)
+    assert near(Namespace.PROJECT) == live

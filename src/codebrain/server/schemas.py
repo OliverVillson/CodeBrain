@@ -92,6 +92,7 @@ class RememberRequest(BaseModel):
 
     summary: str = Field(
         min_length=1,
+        pattern=r"\S",
         description="The distilled lesson: what was built or decided, how, and why. This is "
         "the searchable text.",
     )

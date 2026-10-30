@@ -12,6 +12,7 @@ from codebrain.memory import (
 )
 from codebrain.memory.credit import is_referenced, reference_names
 from codebrain.models import (
+    VALIDITY_CHANGED,
     VALIDITY_CURRENT,
     VALIDITY_DEPRECATED,
     Edge,
@@ -202,6 +203,58 @@ def test_decisions_are_units_and_supersede_old_ones(
     assert d.validity == VALIDITY_CURRENT
 
 
+def test_new_decision_is_not_merged_into_the_one_it_deprecated(
+    store: FakeStore, recorder: EpisodeRecorder
+) -> None:
+    old_id, _ = recorder.record_decision(
+        DecisionRecord(text="Use Redis for rate limits"), repo=REPO
+    )
+    new_id, deprecated = recorder.record_decision(
+        DecisionRecord(text="Use Redis for rate limits only", supersedes=[old_id]), repo=REPO
+    )
+    assert deprecated == [old_id] and new_id != old_id
+    # The old text again is an exact match for the deprecated unit, which must not absorb it.
+    again_id, _ = recorder.record_decision(
+        DecisionRecord(text="Use Redis for rate limits"), repo=REPO
+    )
+    assert again_id != old_id
+    assert store.units[again_id].validity == VALIDITY_CURRENT
+    assert store.units[old_id].validity == VALIDITY_DEPRECATED
+
+
+def test_merge_into_stale_episode_makes_it_current(
+    store: FakeStore, recorder: EpisodeRecorder
+) -> None:
+    first = recorder.record(task())
+    store.set_validity([first.episode_id], VALIDITY_CHANGED)
+    second = recorder.record(task())
+    assert second.merged and second.episode_id == first.episode_id
+    assert store.units[first.episode_id].validity == VALIDITY_CURRENT
+
+
+def test_tombstoned_episode_is_not_a_merge_target(
+    store: FakeStore, recorder: EpisodeRecorder
+) -> None:
+    first = recorder.record(task())
+    ep = store.units[first.episode_id]
+    store.units[ep.id] = ep.model_copy(update={"labels": {**ep.labels, "tombstoned": True}})
+    assert not recorder.record(task()).merged
+
+
+def test_episodes_only_merge_within_namespace_and_session(
+    store: FakeStore, recorder: EpisodeRecorder
+) -> None:
+    private = recorder.record(task(session_only=True))
+    shared = recorder.record(task())
+    assert not shared.merged and shared.episode_id != private.episode_id
+    assert store.units[shared.episode_id].namespace is Namespace.PROJECT
+
+    other = recorder.record(task(session_only=True, session_id="s2"))
+    assert not other.merged and other.episode_id != private.episode_id
+    same = recorder.record(task(session_only=True))
+    assert same.merged and same.episode_id == private.episode_id
+
+
 def test_repeated_decision_merges(store: FakeStore, recorder: EpisodeRecorder) -> None:
     rec = DecisionRecord(text="Keep rate limit state in process memory")
     a = recorder.record(task(decisions=[rec]))
@@ -298,6 +351,12 @@ def test_agent_written_summary_skips_distiller(store: FakeStore, recorder: Episo
     assert "429 on empty" in ep.summary
     assert ep.capabilities == ["rate limiting"]
     assert result.unknown_unit_ids == ["u_missing", "u_also_missing"]
+
+
+def test_blank_summary_falls_back_to_distiller(store: FakeStore, recorder: EpisodeRecorder) -> None:
+    result = recorder.record(task(summary="  \n "))
+    ep = store.units[result.episode_id]
+    assert ep.summary and "token bucket" in ep.summary.lower()
 
 
 def test_session_only_episode(store: FakeStore, recorder: EpisodeRecorder) -> None:

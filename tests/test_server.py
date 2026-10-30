@@ -14,6 +14,7 @@ from mcp import Client, StdioServerParameters
 
 from codebrain.models import (
     VALIDITY_CHANGED,
+    VALIDITY_DEPRECATED,
     Edge,
     EdgeType,
     Layer,
@@ -24,6 +25,13 @@ from codebrain.models import (
 )
 from codebrain.server import InMemoryBackend, MemoryBackend, build_server
 from codebrain.server.__main__ import load_backend
+from codebrain.server.schemas import (
+    IngestRequest,
+    JobState,
+    RecallRequest,
+    RememberKind,
+    RememberRequest,
+)
 
 REPO = "acme"
 
@@ -317,3 +325,80 @@ def test_stdio_entry_point() -> None:
             assert st["units_total"] == 0
 
     anyio.run(main)
+
+
+def _remember(**kw: Any) -> RememberRequest:
+    base: dict[str, Any] = {
+        "summary": "Webhook throttling on a token bucket.",
+        "prompt": "Add rate limiting to outgoing webhooks",
+        "repo": REPO,
+    }
+    return RememberRequest.model_validate({**base, **kw})
+
+
+def test_remember_rejects_blank_summary() -> None:
+    with pytest.raises(ValueError):
+        _remember(summary="  \n ")
+
+
+def test_session_units_are_only_recalled_by_their_session() -> None:
+    backend = InMemoryBackend()
+    mine = backend.remember(_remember(session_id="s1", session_only=True)).unit_id
+
+    def recalled(session_id: str | None) -> list[str]:
+        out = backend.recall(RecallRequest(query="webhook throttling", session_id=session_id))
+        return [u.unit_id for u in out.units]
+
+    assert recalled("s1") == [mine]
+    assert recalled("s2") == []
+    assert recalled(None) == []
+
+
+def test_remember_merges_only_into_live_units_of_the_same_namespace() -> None:
+    backend = InMemoryBackend()
+    private = backend.remember(_remember(session_id="s1", session_only=True))
+    shared = backend.remember(_remember(session_id="s1"))
+    assert shared.merged_into is None and shared.unit_id != private.unit_id
+    other = backend.remember(_remember(session_id="s2", session_only=True))
+    assert other.merged_into is None
+
+    backend.units[shared.unit_id] = backend.units[shared.unit_id].model_copy(
+        update={"validity": VALIDITY_DEPRECATED}
+    )
+    fresh = backend.remember(_remember())
+    assert fresh.merged_into is None and backend.units[fresh.unit_id].validity == 1.0
+
+    backend.units[fresh.unit_id] = backend.units[fresh.unit_id].model_copy(
+        update={"validity": VALIDITY_CHANGED}
+    )
+    again = backend.remember(_remember())
+    assert again.merged_into == fresh.unit_id and backend.units[fresh.unit_id].validity == 1.0
+
+
+def test_remember_decision_records_no_episode() -> None:
+    backend = InMemoryBackend()
+    out = backend.remember(_remember(kind=RememberKind.DECISION))
+    assert backend.units[out.unit_id].kind is UnitKind.DECISION
+    assert backend.status().episodes == 0
+    assert backend.explain(out.unit_id).episode is None
+
+
+def test_ingest_rejects_paths_outside_root_and_finishes_the_job(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n")
+    backend = InMemoryBackend()
+    for paths in (["/etc"], ["../"]):
+        job = backend.ingest(IngestRequest(repo="shop", path=str(tmp_path), paths=paths))
+        assert job.state is JobState.FAILED and job.finished_at is not None
+        assert "outside" in job.errors[0]
+    assert all(j.state is JobState.FAILED for j in backend.status().jobs)
+
+
+def test_ingest_keeps_units_of_unreadable_files(tmp_path: Path) -> None:
+    src = tmp_path / "a.py"
+    src.write_text("x = 1\n")
+    backend = InMemoryBackend()
+    backend.ingest(IngestRequest(repo="shop", path=str(tmp_path)))
+    src.write_bytes(b"\xff\xfe bad utf-8")
+    job = backend.ingest(IngestRequest(repo="shop", path=str(tmp_path)))
+    assert job.state is JobState.DONE and job.errors and job.units_removed == 0
+    assert backend.status().units_total == 1

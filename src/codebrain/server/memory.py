@@ -16,6 +16,7 @@ from pathlib import Path
 
 from codebrain.config import Settings, get_settings
 from codebrain.models import (
+    VALIDITY_CURRENT,
     Edge,
     EdgeType,
     Episode,
@@ -97,7 +98,7 @@ class InMemoryBackend:
         with self._lock:
             scored: list[tuple[float, dict[str, float], Unit]] = []
             for u in self.units.values():
-                if not _matches(u, request.filters):
+                if not _matches(u, request.filters, request.session_id):
                     continue
                 features = _score(q, u)
                 if features["lexical"] == 0:
@@ -175,6 +176,10 @@ class InMemoryBackend:
                     for u in self.units.values()
                     if u.kind is kind
                     and u.repo == request.repo
+                    and u.namespace is namespace
+                    and (namespace is not Namespace.SESSION or u.session_id == request.session_id)
+                    and u.validity > 0
+                    and not u.labels.get("tombstoned")
                     and _jaccard(new_terms, terms(u.summary or ""))
                     >= self.settings.write_back.dup_threshold
                 ),
@@ -183,7 +188,11 @@ class InMemoryBackend:
             if duplicate is not None:
                 unit_id = duplicate.id
                 self.units[unit_id] = duplicate.model_copy(
-                    update={"version": duplicate.version + 1, "updated_at": datetime.now(UTC)}
+                    update={
+                        "version": duplicate.version + 1,
+                        "validity": VALIDITY_CURRENT,
+                        "updated_at": datetime.now(UTC),
+                    }
                 )
             else:
                 unit = Unit(
@@ -199,17 +208,18 @@ class InMemoryBackend:
                 )
                 unit_id = unit.id
                 self.units[unit_id] = unit
-                self.episodes[unit_id] = Episode(
-                    unit_id=unit_id,
-                    session_id=request.session_id,
-                    prompt=request.prompt,
-                    plan=request.plan,
-                    diff=request.diff,
-                    test_results=request.test_results,
-                    tests_passed=request.tests_passed,
-                    pitfalls=request.pitfalls,
-                    started_at=request.started_at,
-                )
+                if kind is UnitKind.EPISODE:
+                    self.episodes[unit_id] = Episode(
+                        unit_id=unit_id,
+                        session_id=request.session_id,
+                        prompt=request.prompt,
+                        plan=request.plan,
+                        diff=request.diff,
+                        test_results=request.test_results,
+                        tests_passed=request.tests_passed,
+                        pitfalls=request.pitfalls,
+                        started_at=request.started_at,
+                    )
 
             credited = [i for i in dict.fromkeys(request.used_unit_ids) if i in self.units]
             for i in credited:
@@ -280,9 +290,10 @@ class InMemoryBackend:
         try:
             job = self._ingest(request, job)
             job.state = JobState.DONE
-        except OSError as e:
+        except Exception as e:
+            # Any failure ends the job; a job left in ``running`` would never finish.
             job.state = JobState.FAILED
-            job.errors.append(str(e))
+            job.errors.append(f"{type(e).__name__}: {e}")
         job.finished_at = datetime.now(UTC)
         with self._lock:
             self.jobs[job.job_id] = job
@@ -292,7 +303,11 @@ class InMemoryBackend:
         root = Path(request.path).expanduser().resolve()
         if not root.is_dir():
             raise NotADirectoryError(f"not a directory: {request.path}")
-        scopes = [root / p for p in request.paths] if request.paths else [root]
+        paths = request.paths or []
+        scopes = [(root / p).resolve() for p in paths] or [root]
+        outside = [p for p, s in zip(paths, scopes, strict=False) if not s.is_relative_to(root)]
+        if outside:
+            raise ValueError(f"paths outside {root}: {', '.join(outside)}")
         files: list[Path] = []
         for scope in scopes:
             candidates = [scope] if scope.is_file() else sorted(scope.rglob("*"))
@@ -308,13 +323,14 @@ class InMemoryBackend:
         for f in files:
             job.files_seen += 1
             rel = f.relative_to(root).as_posix()
+            unit_id = code_unit_id(request.repo, rel, rel)
+            # Seen even if unreadable: the file still exists, so its unit is not swept as gone.
+            seen.add(unit_id)
             try:
                 text = f.read_text(encoding="utf-8")
             except (UnicodeDecodeError, OSError) as e:
                 job.errors.append(f"{rel}: {e}")
                 continue
-            unit_id = code_unit_id(request.repo, rel, rel)
-            seen.add(unit_id)
             digest = hashlib.sha256(text.encode()).hexdigest()
             with self._lock:
                 old = self.units.get(unit_id)
@@ -383,9 +399,10 @@ def _score(q: set[str], u: Unit) -> dict[str, float]:
     return {"lexical": lexical, "quality": u.quality, "validity": u.validity, "score": score}
 
 
-def _matches(u: Unit, f: RecallFilters) -> bool:
+def _matches(u: Unit, f: RecallFilters, session_id: str | None) -> bool:
     return (
-        (f.kinds is None or u.kind in f.kinds)
+        (u.namespace is not Namespace.SESSION or u.session_id == session_id)
+        and (f.kinds is None or u.kind in f.kinds)
         and (f.layers is None or u.layer in f.layers)
         and (f.namespaces is None or u.namespace in f.namespaces)
         and (f.repo is None or u.repo == f.repo)
