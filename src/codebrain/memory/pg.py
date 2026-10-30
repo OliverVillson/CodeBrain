@@ -77,6 +77,11 @@ class PgMemoryStore:
         return (unit, float(row[1])) if unit else None
 
     def units_changed_by(self, repo_name: str, changes: Sequence[FileChange]) -> list[Unit]:
+        # v0 approximation: diff lines are numbered in the file as the diff leaves it, while
+        # stored spans come from the last ingest, which may predate the change. Below the
+        # first insertion or deletion the two drift apart, so a link can land on a
+        # neighbouring unit until the next ingest. Matching the ``-`` side's old line numbers
+        # for files ingested before the change would fix it.
         hits: dict[str, Unit] = {}
         for change in changes:
             ranges = change.ranges()

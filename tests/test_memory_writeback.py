@@ -373,3 +373,39 @@ def test_standalone_decision(store: FakeStore, recorder: EpisodeRecorder) -> Non
     d = store.units[decision_id]
     assert d.kind is UnitKind.DECISION and d.repo == REPO and deprecated == []
     assert not any(e.src_id == decision_id for e in store.edges)
+
+
+def test_parse_diff_content_lines_that_look_like_headers() -> None:
+    diff = (
+        "--- a/schema.sql\n+++ b/schema.sql\n@@ -1,4 +1,4 @@\n"
+        " CREATE TABLE t (id int);\n"
+        "--- old comment\n"
+        "+++ new comment\n"
+        " CREATE INDEX t_id ON t (id);\n"
+        "-DROP TABLE x;\n"
+        "+DROP TABLE y;\n"
+    )
+    [f] = parse_diff(diff)
+    assert f.path == "schema.sql"
+    assert f.removed == ["-- old comment", "DROP TABLE x;"]
+    assert f.added == ["++ new comment", "DROP TABLE y;"]
+    assert f.ranges() == [(2, 2), (4, 4)]
+
+
+def test_parse_diff_recovers_from_wrong_hunk_counts() -> None:
+    diff = (
+        "--- a/a.py\n+++ b/a.py\n@@ -1,9 +1,9 @@\n-x = 1\n+x = 2\n"
+        "--- a/b.py\n+++ b/b.py\n@@ -5 +5 @@\n-y = 1\n+y = 2\n"
+    )
+    a, b = parse_diff(diff)
+    assert (a.path, a.ranges()) == ("a.py", [(1, 1)])
+    assert (b.path, b.ranges()) == ("b.py", [(5, 5)])
+
+
+def test_module_reference_names_never_use_the_extension() -> None:
+    java = code(UnitKind.MODULE, "src/pkg/Mod.java", 1, 2, path="src/pkg/Mod.java")
+    assert reference_names(java) == ["Mod", "src.pkg.Mod"]
+    assert not is_referenced(java, "String java = 1;", 3)
+    assert is_referenced(java, "Mod.run();", 3)
+    init = code(UnitKind.MODULE, "pkg/limits/__init__.py", 1, 2, path="pkg/limits/__init__.py")
+    assert reference_names(init) == ["limits", "pkg.limits"]

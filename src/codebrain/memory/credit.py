@@ -32,13 +32,19 @@ class CreditReport:
 def reference_names(unit: Unit) -> list[str]:
     """Identifiers that, appearing in added code, mean the unit was called or imported."""
     names: list[str] = []
-    if unit.qualified_name:
-        parts = re.split(r"[.:/]+", unit.qualified_name)
-        names.append(parts[-1])
-        if unit.kind is UnitKind.MODULE:
-            names.append(".".join(parts))
-    if unit.kind is UnitKind.MODULE and unit.path:
-        names.append(re.sub(r"\.[A-Za-z0-9]+$", "", unit.path).replace("/", "."))
+    if unit.kind is UnitKind.MODULE:
+        # A module's qualified name is usually its path, so never split it on "." blindly:
+        # the last piece would be the extension ("java", "tsx"), which matches unrelated code.
+        if unit.path:
+            dotted = re.sub(r"\.[A-Za-z0-9]+$", "", unit.path).replace("/", ".")
+            if dotted.endswith(".__init__"):
+                dotted = dotted.removesuffix(".__init__")
+            names += [dotted.rsplit(".", 1)[-1], dotted]
+        if unit.qualified_name and unit.qualified_name != unit.path:
+            parts = re.split(r"[.:/]+", unit.qualified_name)
+            names += [parts[-1], ".".join(parts)]
+    elif unit.qualified_name:
+        names.append(re.split(r"[.:/]+", unit.qualified_name)[-1])
     return list(dict.fromkeys(n for n in names if n))
 
 

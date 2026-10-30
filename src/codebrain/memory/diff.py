@@ -39,12 +39,55 @@ def _strip_prefix(path: str) -> str:
     return path[2:] if path[:2] in ("a/", "b/") else path
 
 
+def _is_file_header(lines: list[str], i: int) -> bool:
+    """``--- old`` + ``+++ new`` + ``@@``: a new file even if the hunk counts said otherwise."""
+    return (
+        lines[i].startswith("--- ")
+        and i + 2 < len(lines)
+        and lines[i + 1].startswith("+++ ")
+        and lines[i + 2].startswith("@@")
+    )
+
+
 def parse_diff(diff: str) -> list[FileChange]:
     files: list[FileChange] = []
     current: FileChange | None = None
     old_path: str | None = None
     old_line = new_line = 0
-    for raw in diff.splitlines():
+    # Lines still owed to the current hunk. Inside a hunk, ``--- x`` and ``+++ x`` are a
+    # removed ``-- x`` and an added ``++ x``, not file headers.
+    old_left = new_left = 0
+    lines = diff.splitlines()
+    for i, raw in enumerate(lines):
+        in_hunk = current is not None and (old_left > 0 or new_left > 0)
+        if in_hunk and (raw.startswith(("diff ", "@@")) or _is_file_header(lines, i)):
+            # Hand-written diffs often get the counts wrong; a header ends the hunk anyway.
+            in_hunk = False
+            old_left = new_left = 0
+        if in_hunk and current is not None:
+            if raw.startswith("\\"):
+                continue  # "\ No newline at end of file"
+            if raw.startswith("+"):
+                current.added.append(raw[1:])
+                current.lines.add(new_line)
+                new_line += 1
+                new_left -= 1
+            elif raw.startswith("-"):
+                current.removed.append(raw[1:])
+                # A deletion is recorded where it happened: the old line for a deleted file,
+                # otherwise the surrounding line in the new file.
+                current.lines.add(old_line if current.deleted else max(new_line, 1))
+                old_line += 1
+                old_left -= 1
+            elif raw.startswith(" ") or raw == "":
+                # Some tools strip the space from blank context lines.
+                old_line += 1
+                new_line += 1
+                old_left -= 1
+                new_left -= 1
+            else:
+                old_left = new_left = 0
+            continue
         if raw.startswith("--- "):
             old_path = _strip_prefix(raw[4:])
             continue
@@ -60,18 +103,6 @@ def parse_diff(diff: str) -> list[FileChange]:
         m = _HUNK.match(raw)
         if m:
             old_line, new_line = int(m.group(1)), int(m.group(3))
-            continue
-        if raw.startswith("+"):
-            current.added.append(raw[1:])
-            current.lines.add(new_line)
-            new_line += 1
-        elif raw.startswith("-"):
-            current.removed.append(raw[1:])
-            # A deletion is recorded where it happened: the old line for a deleted file,
-            # otherwise the surrounding line in the new file.
-            current.lines.add(old_line if current.deleted else max(new_line, 1))
-            old_line += 1
-        elif raw.startswith(" "):
-            old_line += 1
-            new_line += 1
+            old_left = int(m.group(2)) if m.group(2) is not None else 1
+            new_left = int(m.group(4)) if m.group(4) is not None else 1
     return [f for f in files if f.lines]
