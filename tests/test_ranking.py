@@ -145,6 +145,26 @@ def test_pagerank_with_zero_weight_edges_has_no_nan() -> None:
     assert r["b"] == pytest.approx(1.0) and r["c"] == 0.0
 
 
+def test_pack_depth_first_gives_leading_units_full_code() -> None:
+    big = _unit(id="big", text="x = 1\n" * 260, signature="def big()", summary="Big.", tokens=390)
+    small = _unit(id="small", text="y = 2\n" * 30, signature="def small()", summary="S.", tokens=45)
+    cands = {"big": pack.options(big, 0.9), "small": pack.options(small, 0.5)}
+    full = {u: next(o.tokens for o in cands[u] if o.resolution is Resolution.FULL) for u in cands}
+    budget = full["big"] + full["small"] - 1
+    # By value per token the knapsack summarises "big" to afford "small" in full.
+    assert pack.pack(cands, budget)["big"].resolution is not Resolution.FULL
+
+    depth = pack.pack_depth_first(cands, budget, full_first=1)
+    assert depth["big"].resolution is Resolution.FULL
+    assert depth["small"].resolution is not Resolution.FULL  # what is left goes to the knapsack
+    assert sum(o.tokens for o in depth.values()) <= budget
+
+    # A leading unit whose full text cannot fit is packed smaller instead of skipped.
+    tight = pack.pack_depth_first(cands, full["big"] - 1, full_first=1)
+    assert tight["big"].resolution is not Resolution.FULL
+    assert pack.pack_depth_first(cands, budget, full_first=0) == pack.pack(cands, budget)
+
+
 def test_pack_skips_missing_resolutions() -> None:
     u = _unit(signature=None, summary=None)
     assert [o.resolution for o in pack.options(u, 1.0)] == [Resolution.FULL]

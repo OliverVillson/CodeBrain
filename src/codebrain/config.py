@@ -101,6 +101,14 @@ class RetrievalParams(BaseModel):
     freshness_half_life_days: float = 30.0
     mmr_mu: float = 0.7
     cross_encoder_top: int = 30
+    full_first: int = 10
+    """Depth first: the top MMR picks are packed as full code, in order, before the
+    knapsack spends what is left. Partial context (a summary where the code was needed)
+    cost most answers on the codebase Q&A benchmark. 0 turns it off."""
+    min_relative_score: float = 0.5
+    """Below the full-code picks, drop units scoring under this fraction of the best
+    score, so weak hits stop padding big budgets (the Q and F priors put a floor of
+    about 0.175 under every candidate)."""
 
     @property
     def freshness_lambda(self) -> float:

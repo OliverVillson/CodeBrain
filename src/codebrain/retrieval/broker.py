@@ -37,6 +37,10 @@ from codebrain.store import repo
 INDEXES = ("semantic", "code", "lexical")
 
 
+REDUNDANT_VALUE = 0.05
+"""Packing value, as a fraction of its score, for a pick whose MMR value is <= 0."""
+
+
 class RecalledUnit(BaseModel):
     unit: Unit
     rank: int
@@ -340,8 +344,19 @@ class ContextBroker:
     def _pack(
         self, ranking: _Ranking, budget: int, k: int | None
     ) -> tuple[dict[str, pack.Option], list[str]]:
+        rp = self.settings.retrieval
         picks = ranking.picks[:k] if k is not None else ranking.picks
+        if picks:
+            floor = rp.min_relative_score * max(p.score for p in picks)
+            picks = [p for i, p in enumerate(picks) if i < rp.full_first or p.score >= floor]
         candidates = {
-            p.unit_id: pack.options(ranking.rows[p.unit_id].unit, max(p.value, 0.0)) for p in picks
+            # A redundant pick's MMR value can be <= 0, which kept it out of the knapsack
+            # even with budget to spare. Floor it at a sliver of its score: still last in
+            # line, but it can fill what is left.
+            p.unit_id: pack.options(
+                ranking.rows[p.unit_id].unit, max(p.value, REDUNDANT_VALUE * p.score)
+            )
+            for p in picks
         }
-        return pack.pack(candidates, budget), [p.unit_id for p in picks]
+        packed = pack.pack_depth_first(candidates, budget, rp.full_first)
+        return packed, [p.unit_id for p in picks]
