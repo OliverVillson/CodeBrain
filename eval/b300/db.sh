@@ -18,10 +18,22 @@ if ! reachable; then
     echo "Install docker, or point CODEBRAIN_DATABASE_URL at a Postgres 16 with pgvector."
     exit 1
   fi
+  # Without docker group membership the socket is root-only; use sudo for docker then.
+  DOCKER=(docker)
+  if ! docker info >/dev/null 2>&1; then
+    if sudo docker info >/dev/null; then
+      DOCKER=(sudo docker)
+      echo "Using sudo for docker (add yourself to the docker group to skip this:"
+      echo "  sudo usermod -aG docker \$USER, then log in again)"
+    else
+      echo "Cannot reach the docker daemon, even with sudo. Is it running? (sudo systemctl start docker)"
+      exit 1
+    fi
+  fi
   echo "Starting Postgres + pgvector (docker compose service db) ..."
-  docker compose up -d db
+  "${DOCKER[@]}" compose up -d db
   for _ in $(seq 60); do reachable && break; sleep 2; done
-  reachable || { echo "Postgres did not come up:"; docker compose logs --tail 30 db; exit 1; }
+  reachable || { echo "Postgres did not come up:"; "${DOCKER[@]}" compose logs --tail 30 db; exit 1; }
 fi
 "$(dirname "$PY")/codebrain" migrate >/dev/null
 echo "Store ready at $CODEBRAIN_DATABASE_URL"
