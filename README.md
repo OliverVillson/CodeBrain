@@ -32,7 +32,7 @@ database.
 | `codebrain/ingest/` | §3, §4, §5 | Repo to units: tree-sitter parse, AST chunking within τ bounds, AST hashing, LLM summaries, embeddings, layer and capability classification, call/import/contains edges. *(next)* |
 | `codebrain/retrieval/` | §6, §7 | The context broker. `ContextBroker(conn, encoders).recall(query, budget)` and `.explain(query, unit_id)`. Modules: `search` (three indexes, `Filters`), `fusion` (RRF), `graph` (personalized PageRank), `scoring` (S(u\|q) and `ScoreBreakdown`), `mmr`, `pack` (resolution knapsack and rendering), `encoders` (the `Embedder` protocol for query vectors). |
 | `codebrain/server/` | §10 | MCP server with `recall(query, k, filters)`, `remember(episode)`, `explain(unit_id)`. *(next)* |
-| write-back and paging | §8, §9 | Episode distilling, duplicate merge, usage credit, and window eviction to turn units. Expected to live in `codebrain/memory/` (not created yet). *(next)* |
+| `codebrain/memory/` | §8, §9 | Write-back and paging. `EpisodeRecorder.record(TaskRecord)` writes an episode unit (merged into a near-duplicate above θ_dup), decision units, `produced_by` edges to the code units in the diff, and usage credit for recalled units the task reused. `SessionTracker` is the harness API for a live window: it pins task facts and pages the oldest turns out to session-namespace `turn` units past 70%, down to 50%. Embedding, distilling and storage are protocols in `memory/interfaces.py`; `PgMemoryStore` backs them with Postgres. |
 | `codebrain/cli.py` | | `codebrain migrate`; other commands get added here. |
 
 ## Schema
@@ -45,7 +45,7 @@ Defined in `src/codebrain/store/migrations/0001_init.sql`.
 | `units.lexical` | §4 | Generated `tsvector` over `lexical_terms` (split identifiers, weight A) and `summary` (weight B). Stands in for BM25 until a real BM25 is added. |
 | `unit_vectors` | §4 | One row per (unit, view, model). Views are `summary` (s_u) and `code` (c_u). The column is untyped `vector` because models are undecided; build an HNSW index per model once one is picked (example in the migration). `content_hash` lets ingest reuse vectors for unchanged code. |
 | `edges` | §6 | Typed directed edges. `NULL` weight means the default for the type (`EdgeType.default_weight`). Cascade on unit delete. |
-| `episodes` | §8 | Raw evidence (prompt, plan, diff, test results) behind an `episode` unit. |
+| `episodes` | §8 | Raw evidence (prompt, plan, diff, test results) behind an `episode` unit. One row per run: a merged near-duplicate adds a row instead of overwriting (`0002_episode_runs.sql`). |
 | `retrievals` | §8 | Every recalled unit with its stage-2 features, for usage credit and learning weights. |
 
 ## Working on this in parallel
