@@ -14,12 +14,13 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from codebrain.ingest.tokens import approx_tokens
 from codebrain.models import VALIDITY_CURRENT, Resolution, Unit
 
 
 def estimate_tokens(text: str) -> int:
-    """About 4 characters per token. Used where ingest has not counted tokens."""
-    return math.ceil(len(text) / 4) if text else 0
+    """Ingest's token approximation, so the packer prices every resolution on one scale."""
+    return approx_tokens(text)
 
 
 def citation(unit: Unit) -> str:
@@ -59,11 +60,11 @@ def render(unit: Unit, resolution: Resolution) -> str:
 
 
 def tokens_at(unit: Unit, resolution: Resolution) -> int | None:
-    text = body(unit, resolution)
-    if text is None:
+    """Tokens of the rendered block. Every resolution uses the same estimator: mixing
+    ``unit.tokens`` (whatever counter wrote the unit) for full text with an estimate for
+    summaries made a short unit's summary look dearer than its code, and pruned it."""
+    if body(unit, resolution) is None:
         return None
-    if resolution is Resolution.FULL and unit.tokens > 0:
-        return unit.tokens + estimate_tokens(header(unit)) + 1
     return estimate_tokens(render(unit, resolution))
 
 

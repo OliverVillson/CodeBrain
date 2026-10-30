@@ -90,7 +90,7 @@ def register_embedder(prefix: str, factory: EmbedderFactory) -> None:
     _REGISTRY[prefix] = factory
 
 
-def make_embedder(spec: str, dim: int = 1024) -> Embedder:
+def make_embedder(spec: str, dim: int = 1024, batch_size: int = 64) -> Embedder:
     prefix, _, arg = spec.partition(":")
     if prefix.startswith("unset"):
         log.warning("embedding model %r is not chosen yet; using the hashing baseline", spec)
@@ -98,7 +98,7 @@ def make_embedder(spec: str, dim: int = 1024) -> Embedder:
     if prefix == "hashing":
         return HashingEmbedder(int(arg) if arg else dim)
     if prefix == "sentence-transformers":
-        return SentenceTransformerEmbedder(arg)
+        return SentenceTransformerEmbedder(arg, batch_size=batch_size)
     if prefix in _REGISTRY:
         return _REGISTRY[prefix](arg)
     raise ValueError(f"unknown embedding model {spec!r}")

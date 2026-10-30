@@ -156,6 +156,39 @@ def test_rerun_skips_unchanged_files(tmp_path: Path, store: IngestStore) -> None
     assert s.seen == []
 
 
+def test_new_embedding_model_reaches_unchanged_files(tmp_path: Path, store: IngestStore) -> None:
+    write(tmp_path, {"rl/clock.py": CLOCK_PY})
+    s = CountingSummarizer()
+    make(store, s).ingest(tmp_path)
+    s.seen.clear()
+    emb = HashingEmbedder(32)
+    r = Ingestor(
+        store,
+        REPO,
+        settings=Settings(chunking=ChunkingParams(tau_min=5, tau_max=1200)),
+        summarizer=s,
+        embedders={VectorView.SUMMARY: emb, VectorView.CODE: emb},
+        clock=lambda: CLOCK,
+    ).ingest(tmp_path)
+    assert (r.files_unchanged, r.files_parsed) == (0, 1)
+    # Summaries are still current; only the vectors for the new model are written.
+    assert s.seen == [] and r.summaries_reused == 2 and r.vectors_embedded == 4
+    now = uid("rl/clock.py", "now")
+    assert store.vector_hash(now, VectorView.SUMMARY, "hashing-v1-32")
+    again = make(store, s).ingest(tmp_path)
+    assert again.files_parsed == 1 and again.vectors_embedded == 0
+
+
+def test_absolute_and_escaping_paths(tmp_path: Path, store: IngestStore) -> None:
+    write(tmp_path, {"rl/bucket.py": BUCKET, "rl/clock.py": CLOCK_PY})
+    r = make(store).ingest(tmp_path, [str(tmp_path / "rl" / "clock.py")])
+    assert r.files_parsed == 1 and unit(store, "rl/clock.py", "now")
+    with pytest.raises(ValueError, match="outside"):
+        make(store).ingest(tmp_path, ["/etc"])
+    with pytest.raises(ValueError, match="outside"):
+        make(store).ingest(tmp_path, ["rl/../../x"])
+
+
 def test_edit_resummarizes_only_changed_units(tmp_path: Path, store: IngestStore) -> None:
     write(tmp_path, {"rl/bucket.py": BUCKET, "rl/clock.py": CLOCK_PY})
     s = CountingSummarizer()

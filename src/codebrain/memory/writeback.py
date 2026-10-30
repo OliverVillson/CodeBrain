@@ -27,6 +27,7 @@ from codebrain.memory.interfaces import (
 )
 from codebrain.memory.records import DecisionRecord, DistilledTask, TaskRecord
 from codebrain.models import (
+    VALIDITY_CURRENT,
     VALIDITY_DEPRECATED,
     Edge,
     EdgeType,
@@ -157,7 +158,7 @@ class EpisodeRecorder:
         return self._write_decision(rec, repo, session_id, episode_id)
 
     def _distill(self, task: TaskRecord) -> DistilledTask:
-        if task.summary:
+        if task.summary and task.summary.strip():
             lines = [ln.strip() for ln in task.summary.strip().splitlines() if ln.strip()]
             distilled = DistilledTask(
                 title=lines[0], built="\n".join(lines[1:]) or lines[0], pitfalls=task.pitfalls
@@ -177,7 +178,15 @@ class EpisodeRecorder:
         vec = self._embed(summary)
         terms = _lexical_terms(code, distilled.capabilities)
 
-        hit = self.store.nearest(UnitKind.EPISODE, self.embedder.model, vec, task.repo)
+        namespace = Namespace.SESSION if task.session_only else Namespace.PROJECT
+        hit = self.store.nearest(
+            UnitKind.EPISODE,
+            self.embedder.model,
+            vec,
+            task.repo,
+            namespace=namespace,
+            session_id=task.session_id,
+        )
         if hit and hit[1] >= self.params.dup_threshold:
             old = hit[0]
             version = old.version + 1
@@ -192,6 +201,8 @@ class EpisodeRecorder:
                     "lexical_terms": _merge_terms(old.lexical_terms, terms),
                     "capabilities": list(dict.fromkeys(old.capabilities + distilled.capabilities)),
                     "labels": {**old.labels, "runs": runs, "outcome": str(task.outcome)},
+                    # The new run is fresh evidence, even if ingest marked the old one stale.
+                    "validity": VALIDITY_CURRENT,
                     "updated_at": datetime.now(UTC),
                 }
             )
@@ -200,7 +211,7 @@ class EpisodeRecorder:
 
         unit = Unit(
             kind=UnitKind.EPISODE,
-            namespace=Namespace.SESSION if task.session_only else Namespace.PROJECT,
+            namespace=namespace,
             repo=task.repo,
             session_id=task.session_id,
             text=text,
@@ -224,7 +235,9 @@ class EpisodeRecorder:
     ) -> tuple[str, list[str]]:
         text = rec.text.strip() + (f"\nWhy: {rec.rationale.strip()}" if rec.rationale else "")
         vec = self._embed(text)
-        hit = self.store.nearest(UnitKind.DECISION, self.embedder.model, vec, repo)
+        hit = self.store.nearest(
+            UnitKind.DECISION, self.embedder.model, vec, repo, namespace=Namespace.PROJECT
+        )
         if hit and hit[1] >= self.params.dup_threshold and hit[0].id not in rec.supersedes:
             old = hit[0]
             labels = dict(old.labels)
@@ -238,6 +251,7 @@ class EpisodeRecorder:
                 update={
                     "version": old.version + 1,
                     "labels": labels,
+                    "validity": VALIDITY_CURRENT,
                     "updated_at": datetime.now(UTC),
                 }
             )

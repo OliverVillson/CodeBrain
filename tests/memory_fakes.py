@@ -10,7 +10,16 @@ from datetime import UTC, datetime
 
 from codebrain.memory.diff import FileChange
 from codebrain.memory.pg import innermost
-from codebrain.models import Edge, Episode, Retrieval, Unit, UnitKind, UnitVector, VectorView
+from codebrain.models import (
+    Edge,
+    Episode,
+    Namespace,
+    Retrieval,
+    Unit,
+    UnitKind,
+    UnitVector,
+    VectorView,
+)
 
 
 class BagOfWordsEmbedder:
@@ -90,7 +99,14 @@ class FakeStore:
         self.episodes.append(episode)
 
     def nearest(
-        self, kind: UnitKind, model: str, embedding: Sequence[float], repo_name: str | None
+        self,
+        kind: UnitKind,
+        model: str,
+        embedding: Sequence[float],
+        repo_name: str | None,
+        *,
+        namespace: Namespace,
+        session_id: str | None = None,
     ) -> tuple[Unit, float] | None:
         best: tuple[Unit, float] | None = None
         for (uid, view, m), vec in self.vectors.items():
@@ -98,6 +114,10 @@ class FakeStore:
             if u.kind is not kind or view != VectorView.SUMMARY or m != model:
                 continue
             if u.repo != repo_name or vec.dim != len(embedding):
+                continue
+            if u.namespace is not namespace or u.validity <= 0 or u.labels.get("tombstoned"):
+                continue
+            if u.namespace is Namespace.SESSION and u.session_id != session_id:
                 continue
             sim = _cos(vec.embedding, embedding)
             if best is None or sim > best[1]:

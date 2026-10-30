@@ -80,6 +80,10 @@ class GraphParams(BaseModel):
     ppr_tolerance: float = 1e-6
     expand_keep: int = 20
     """Graph neighbours (not found by any index) added to the candidates, by PageRank."""
+    expand_load_factor: int = 4
+    """Neighbours are loaded in PageRank order, ``expand_load_factor * expand_keep`` at a
+    time, until ``expand_keep`` pass the filters; the 2-hop neighbourhood can be most of
+    the repo, so loading all of it (with vectors) is the main cost of a recall."""
 
 
 class RetrievalParams(BaseModel):

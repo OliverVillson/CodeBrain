@@ -14,7 +14,7 @@ import numpy as np
 import psycopg
 
 from codebrain.memory.diff import FileChange
-from codebrain.models import Edge, Episode, Retrieval, Unit, UnitKind, UnitVector
+from codebrain.models import Edge, Episode, Namespace, Retrieval, Unit, UnitKind, UnitVector
 from codebrain.store import repo
 
 
@@ -40,7 +40,14 @@ class PgMemoryStore:
         repo.insert_episode(self.conn, episode)
 
     def nearest(
-        self, kind: UnitKind, model: str, embedding: Sequence[float], repo_name: str | None
+        self,
+        kind: UnitKind,
+        model: str,
+        embedding: Sequence[float],
+        repo_name: str | None,
+        *,
+        namespace: Namespace,
+        session_id: str | None = None,
     ) -> tuple[Unit, float] | None:
         row = self.conn.execute(
             """
@@ -48,6 +55,9 @@ class PgMemoryStore:
             FROM unit_vectors v JOIN units u ON u.id = v.unit_id
             WHERE u.kind = %(kind)s AND v.view = 'summary' AND v.model = %(model)s
               AND v.dim = %(dim)s AND u.repo IS NOT DISTINCT FROM %(repo)s
+              AND u.namespace = %(namespace)s
+              AND (u.namespace <> 'session' OR u.session_id = %(session)s)
+              AND u.validity > 0 AND NOT (u.labels ? 'tombstoned')
             ORDER BY v.embedding <=> %(q)s
             LIMIT 1
             """,
@@ -57,6 +67,8 @@ class PgMemoryStore:
                 "model": model,
                 "dim": len(embedding),
                 "repo": repo_name,
+                "namespace": namespace,
+                "session": session_id,
             },
         ).fetchone()
         if row is None:
@@ -65,6 +77,11 @@ class PgMemoryStore:
         return (unit, float(row[1])) if unit else None
 
     def units_changed_by(self, repo_name: str, changes: Sequence[FileChange]) -> list[Unit]:
+        # v0 approximation: diff lines are numbered in the file as the diff leaves it, while
+        # stored spans come from the last ingest, which may predate the change. Below the
+        # first insertion or deletion the two drift apart, so a link can land on a
+        # neighbouring unit until the next ingest. Matching the ``-`` side's old line numbers
+        # for files ingested before the change would fix it.
         hits: dict[str, Unit] = {}
         for change in changes:
             ranges = change.ranges()

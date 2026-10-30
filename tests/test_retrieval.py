@@ -318,3 +318,40 @@ def test_lexical_only_without_encoders(conn: psycopg.Connection, corpus: dict[st
     result = broker.recall("token bucket", 10_000, log=False)
     assert result.units[0].unit.id == "bucket"
     assert result.units[0].breakdown.semantic == 0
+
+
+@pytest.mark.db
+def test_graph_expansion_loads_a_bounded_prefix(
+    conn: psycopg.Connection, corpus: dict[str, Unit], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The bucket's module contains 200 more units: all are 1-2 hops from a seed.
+    module = _store(
+        conn,
+        _code("mod", "ratelimit/bucket.py", "ratelimit/bucket.py", "Module.", "module"),
+    )
+    repo.add_edges(conn, [Edge(src_id=module.id, dst_id="bucket", type=EdgeType.CONTAINS)])
+    for i in range(200):
+        u = _store(
+            conn,
+            _code(f"n{i}", "ratelimit/bucket.py", f"n{i}", "Other code.", "zzz"),
+            vectors=False,
+        )
+        repo.add_edges(conn, [Edge(src_id=module.id, dst_id=u.id, type=EdgeType.CONTAINS)])
+
+    from codebrain.retrieval import broker as broker_mod
+
+    loaded: list[int] = []
+    real = broker_mod.search.load_candidates
+
+    def counting(*args: object, **kw: object) -> object:
+        loaded.append(len(args[1]))  # type: ignore[arg-type]
+        return real(*args, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(broker_mod.search, "load_candidates", counting)
+    settings = Settings()
+    settings.graph.expand_keep = 5
+    settings.graph.expand_load_factor = 2
+    result = _broker(conn, settings).recall(QUERY, 10_000, log=False)
+    assert result.units
+    # Seeds, then one batch of 2 * 5 neighbours was enough to fill the 5 slots.
+    assert loaded[1:] == [10]
