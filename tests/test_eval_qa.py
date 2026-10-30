@@ -1,5 +1,6 @@
 import asyncio
 import json
+import subprocess
 from pathlib import Path
 
 import psycopg
@@ -70,3 +71,35 @@ def test_fake_run_writes_report(database_url: str, tmp_path: Path) -> None:
     assert all(a["recalled"] for a in answers if a["mode"] == "codebrain")
     assert all("@" in c for a in answers for c in a["recalled"])
     assert "Codebase Q&A" in (run / "report.md").read_text()
+
+
+def test_haystack_adds_library_code_round_robin(tmp_path: Path) -> None:
+    lib = tmp_path / "lib"
+    (lib / "lib").mkdir(parents=True)
+    (lib / "tests").mkdir()
+    for i in range(3):
+        (lib / "lib" / f"m{i}.py").write_text(f"def f{i}():\n    return {i}\n" * 20)
+    (lib / "tests" / "test_m.py").write_text("def test_x():\n    pass\n")
+    for args in (
+        ["init", "-q"],
+        ["add", "."],
+        ["-c", "user.name=t", "-c", "user.email=t@e", "commit", "-qm", "x"],
+    ):
+        subprocess.run(["git", "-C", str(lib), *args], check=True)
+    sha = subprocess.run(
+        ["git", "-C", str(lib), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+    dest = qa.build_haystack_codebase(
+        qa.DEFAULT_CODEBASE,
+        [f"file://{lib}@{sha}"],
+        tmp_path / "cache",
+        max_tokens=200,
+        count_tokens=lambda t: len(t) // 4,
+        dest=tmp_path / "combined",
+    )
+    paths = dict(qa.codebase_files(dest))
+    assert "tidepool/retry.py" in paths
+    added = [p for p in paths if p.startswith("libs/lib/")]
+    assert added and len(added) < 3  # capped by max_tokens
+    assert not any("tests/" in p for p in added)

@@ -81,6 +81,16 @@ Each needs specific names and numbers, often from more than one file, and severa
 look-alike elsewhere in the code (for example the webhook retry schedule versus the job
 retry backoff).
 
+`qa.sh` also mixes in about 130k tokens of real job-queue libraries (rq, huey and arq at
+pinned commits, without their tests or docs) under `libs/`, so the codebase is about
+150k tokens and the ten questions get a prefix naming the package they are about. These
+libraries cover the same ground (retries, backoff, rate limits, scheduling), so they are
+look-alikes for retrieval, and at this size the full codebase no longer costs nothing
+to read. `HAYSTACK=0 eval/b300/qa.sh` runs the bare fixture; `--qa-haystack URL@REF`
+(repeatable) and `--qa-haystack-tokens N` choose your own. `qa.sh` serves vLLM with a
+196k-token window (`MAX_MODEL_LEN`) and restarts a running server whose window is
+smaller.
+
 How it runs:
 
 1. **Ingest, not timed.** The fixture is ingested into Postgres with the real
