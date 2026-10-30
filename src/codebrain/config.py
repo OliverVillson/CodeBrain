@@ -74,6 +74,12 @@ class GraphParams(BaseModel):
 
     ppr_beta: float = 0.5
     similar_to_threshold: float = 0.85
+    ppr_hops: int = 2
+    """How far from the seed hits edges are loaded for the walk."""
+    ppr_iterations: int = 50
+    ppr_tolerance: float = 1e-6
+    expand_keep: int = 20
+    """Graph neighbours (not found by any index) added to the candidates, by PageRank."""
 
 
 class RetrievalParams(BaseModel):
@@ -102,6 +108,8 @@ class WriteBackParams(BaseModel):
     """Sketch §8."""
 
     dup_threshold: float = 0.92
+    min_reference_length: int = 3
+    """Shortest identifier that counts as a call or import of a recalled unit in a diff."""
 
 
 class PagingParams(BaseModel):
@@ -111,6 +119,10 @@ class PagingParams(BaseModel):
     low_water: float = 0.50
     session_weight: float = 1.2
     session_half_life_hours: float = 2.0
+    keep_recent_turns: int = 2
+    """Turns at the end of the window that are never evicted, however full it is."""
+    turn_unit_max_tokens: int = 1200
+    """Evicted turns are grouped into turn units of at most this size (τ_max, §3)."""
 
 
 class Settings(BaseSettings):
