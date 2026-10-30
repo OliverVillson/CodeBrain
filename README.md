@@ -34,6 +34,7 @@ database.
 | `codebrain/server/` | §10 | MCP server (stdio) with `recall`, `remember`, `explain`, `ingest`, `status`. `schemas.py` (tool inputs and outputs), `backend.py` (the `MemoryBackend` protocol the tools call), `memory.py` (in-memory fake), `app.py` (tools). See [Connecting an agent](#connecting-an-agent). |
 | `codebrain/memory/` | §8, §9 | Write-back and paging. `EpisodeRecorder.record(TaskRecord)` writes an episode unit (merged into a near-duplicate above θ_dup), decision units, `produced_by` edges to the code units in the diff, and usage credit for recalled units the task reused. `SessionTracker` is the harness API for a live window: it pins task facts and pages the oldest turns out to session-namespace `turn` units past 70%, down to 50%. Embedding, distilling and storage are protocols in `memory/interfaces.py`; `PgMemoryStore` backs them with Postgres. |
 | `codebrain/cli.py` | | `codebrain migrate`; other commands get added here. |
+| `codebrain/eval/` + `eval/` | plan Q1, Q2, Q4 | Evaluation harness: gold tasks mined from git history, retrieval metrics, paging vs compaction. Self-contained baseline so it runs before ingest and retrieval exist. GPU run scripts in `eval/b300/`; see `eval/README.md`. |
 
 ## Connecting an agent
 

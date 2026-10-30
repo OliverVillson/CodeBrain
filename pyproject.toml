@@ -52,3 +52,8 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 python_version = "3.11"
 strict = true
 plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+# Eval-only GPU dependencies, installed from eval/requirements.txt rather than the lock.
+module = ["sentence_transformers.*", "transformers.*", "openai.*", "torch.*"]
+ignore_missing_imports = true
