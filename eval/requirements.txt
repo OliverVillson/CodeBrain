@@ -2,6 +2,8 @@
 # large and only needed on the eval machine. Install with eval/b300/setup.sh.
 # vLLM 0.17 and transformers 5.8 are the first releases that serve Qwen3.8.
 vllm>=0.17
+# vLLM builds some kernels on first use and needs ninja on PATH for that.
+ninja
 sentence-transformers>=3.0
 transformers>=5.8
 openai>=1.40
