@@ -38,7 +38,7 @@ import torch.nn.functional as F
 from torch import nn
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from heal import QUERY_INSTRUCTION, load_pairs, query_prefix  # noqa: E402
+from heal import QUERY_INSTRUCTION, load_pairs, query_prefix, tokenize  # noqa: E402
 
 
 def backbone(model: Any) -> Any:
@@ -120,7 +120,7 @@ def influence_layers(
     count = 0
     device = next(net.parameters()).device
     for i in range(0, len(texts), batch):
-        feats = model.tokenize(list(texts[i : i + batch]))
+        feats = tokenize(model, texts[i : i + batch])
         feats = {k: v.to(device) for k, v in feats.items() if hasattr(v, "to")}
         out = net(
             input_ids=feats["input_ids"],

@@ -172,8 +172,14 @@ def batches(
 # Model
 
 
+def tokenize(model: Any, texts: Sequence[str]) -> dict[str, Any]:
+    """``preprocess`` in sentence-transformers 6, ``tokenize`` before."""
+    fn = getattr(model, "preprocess", None) or model.tokenize
+    return dict(fn(list(texts)))
+
+
 def encode(model: Any, texts: Sequence[str], device: torch.device) -> torch.Tensor:
-    feats = model.tokenize(list(texts))
+    feats = tokenize(model, texts)
     feats = {k: v.to(device) if hasattr(v, "to") else v for k, v in feats.items()}
     with torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
         out = model(feats)["sentence_embedding"]
@@ -209,12 +215,12 @@ def info_nce(
         if dim is None:
             full_scores = s
         loss = F.cross_entropy(s, labels)
-        parts[f"nce@{dim or 'full'}"] = float(loss)
+        parts[f"nce@{dim or 'full'}"] = loss.item()
         total = total + loss / len(dims)
     if teacher_scores is not None and cfg.distill > 0 and full_scores is not None:
         target = F.softmax(teacher_scores.masked_fill(mask, _MASKED), dim=-1)
         kl = F.kl_div(F.log_softmax(full_scores, dim=-1), target, reduction="batchmean")
-        parts["kl"] = float(kl)
+        parts["kl"] = kl.item()
         total = total + cfg.distill * kl
     return total, parts
 
@@ -256,7 +262,7 @@ def train_step(
         for i in range(0, len(texts), cfg.chunk):
             emb = encode(model, texts[i : i + cfg.chunk], device)
             emb.backward(grads[i : i + cfg.chunk])
-    parts["loss"] = float(loss)
+    parts["loss"] = loss.item()
     return parts
 
 
