@@ -4,7 +4,8 @@
 only the named files or directories (a post-commit hook or file watcher passes the
 changed paths). Either way, work is skipped at three levels:
 
-* a file whose bytes hash the same as at the last ingest is not parsed again;
+* a file whose bytes hash the same as at the last ingest, under the same summarizer
+  and embedding models, is not parsed again;
 * a unit whose ``ast_hash`` is unchanged keeps its summary;
 * a vector whose input text hashes the same is not re-embedded, and an input seen
   on any other unit (moved or copied code) reuses that unit's vector.
@@ -24,6 +25,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import logging
+import posixpath
 import subprocess
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -63,6 +65,7 @@ INGEST_LABELS = frozenset(
     {
         "file_hash",
         "ingest_version",
+        "ingest_models",
         "has_errors",
         "is_test",
         "summarizer",
@@ -142,12 +145,23 @@ class Ingestor:
         )
         if embedders is None:
             embedders = {
-                VectorView.SUMMARY: make_embedder(s.embedding.text_model, s.embedding.dim),
-                VectorView.CODE: make_embedder(s.embedding.code_model, s.embedding.dim),
+                VectorView.SUMMARY: make_embedder(
+                    s.embedding.text_model, s.embedding.dim, s.embedding.batch_size
+                ),
+                VectorView.CODE: make_embedder(
+                    s.embedding.code_model, s.embedding.dim, s.embedding.batch_size
+                ),
             }
         self.embedders = dict(embedders)
         self.clock = clock or (lambda: datetime.now(UTC))
         self._fallback = HeuristicSummarizer()
+
+    @property
+    def models(self) -> dict[str, str]:
+        """The summarizer and embedding models a file was last ingested with."""
+        out = {"summarizer": self.summarizer.name}
+        out.update({str(view): e.model for view, e in sorted(self.embedders.items())})
+        return out
 
     # Entry point
 
@@ -167,7 +181,7 @@ class Ingestor:
             candidates = on_disk
             removed = sorted(stored_paths - set(on_disk))
         else:
-            scopes = [_norm(p) for p in paths]
+            scopes = [_scope(root, p) for p in paths]
             candidates = [p for p in on_disk if any(_within(p, s) for s in scopes)]
             disk = set(on_disk)
             removed = sorted(
@@ -246,6 +260,9 @@ class Ingestor:
             and not is_tombstoned(module)
             and module.labels.get("file_hash") == file_hash
             and module.labels.get("ingest_version") == INGEST_VERSION
+            # A new summarizer or embedder must still reach unchanged files; reparsing is
+            # cheap, and the per-unit summary and vector checks skip what is still current.
+            and module.labels.get("ingest_models") == self.models
         ):
             report.files_unchanged += 1
             return None
@@ -324,7 +341,11 @@ class Ingestor:
                 if pf.is_test:
                     labels["is_test"] = True
                 if i == 0:
-                    labels.update(file_hash=w.file_hash, ingest_version=INGEST_VERSION)
+                    labels.update(
+                        file_hash=w.file_hash,
+                        ingest_version=INGEST_VERSION,
+                        ingest_models=self.models,
+                    )
                     if pf.has_errors:
                         labels["has_errors"] = True
                 version = 1
@@ -458,7 +479,21 @@ def _matches(path: str, globs: Iterable[str]) -> bool:
 
 
 def _norm(p: str) -> str:
-    return Path(p).as_posix().strip("/").removeprefix("./") or "."
+    return posixpath.normpath(Path(p).as_posix()).strip("/").removeprefix("./") or "."
+
+
+def _scope(root: Path, p: str) -> str:
+    """A ``paths`` entry as a repo-relative path. Absolute paths must lie under ``root``."""
+    path = Path(p).expanduser()
+    if path.is_absolute():
+        try:
+            return _norm(path.resolve().relative_to(root).as_posix())
+        except ValueError:
+            raise ValueError(f"{p} is outside the checkout {root}") from None
+    scope = _norm(p)
+    if scope == ".." or scope.startswith("../"):
+        raise ValueError(f"{p} is outside the checkout {root}")
+    return scope
 
 
 def _within(path: str, scope: str) -> bool:

@@ -8,7 +8,7 @@ functions bound to variables). Adding a language means adding one spec.
 from __future__ import annotations
 
 import fnmatch
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from functools import cache
 from pathlib import PurePosixPath
@@ -81,6 +81,8 @@ class LanguageSpec:
     """Call node type -> field holding the callee."""
     comments: frozenset[str] = frozenset({"comment", "line_comment", "block_comment"})
     self_names: frozenset[str] = frozenset({"self", "this"})
+    implicit_self: bool = False
+    """A bare ``x()`` inside a type can mean ``this.x()`` (Java), so try the type first."""
     test_globs: tuple[str, ...] = ()
     imports: Callable[[Node], Iterator[ImportRef]] = field(default=lambda _: iter(()))
 
@@ -116,8 +118,10 @@ class LanguageSpec:
             if t == "impl_item":
                 return _rust_impl(node)
             if t == "type_declaration":
-                spec = next((c for c in node.named_children if c.type == "type_spec"), None)
-                name = _name(spec) if spec is not None else None
+                specs = _go_type_specs(node)
+                if len(specs) != 1:
+                    return None  # grouped ``type (...)``: see ``definitions_at``
+                name = _name(specs[0])
             else:
                 name = _name(node)
             return Definition("class", name, node, node) if name else None
@@ -133,20 +137,37 @@ class LanguageSpec:
                     return Definition("function", name, value, node)
         return None
 
+    def definitions_at(self, node: Node) -> list[Definition]:
+        """The units ``node`` itself declares: usually zero or one, one per spec for Go's
+        grouped ``type (A struct{}; B int)``."""
+        if node.type == "type_declaration" and node.type in self.classes:
+            specs = _go_type_specs(node)
+            if len(specs) > 1:
+                return [
+                    Definition("class", name, spec, spec)
+                    for spec in specs
+                    if (name := _name(spec)) is not None
+                ]
+        d = self.definition(node)
+        return [d] if d is not None else []
+
     def definitions(self, node: Node) -> Iterator[Definition]:
         """Definitions directly under ``node``, looking through non-definition nodes."""
         for child in node.named_children:
-            d = self.definition(child)
-            if d is not None:
-                yield d
+            found = self.definitions_at(child)
+            if found:
+                yield from found
             elif child.type not in self.opaque and child.type not in self.comments:
                 yield from self.definitions(child)
 
-    def call_refs(self, node: Node) -> Iterator[CallRef]:
-        """Every call site under ``node``."""
+    def call_refs(self, node: Node, exclude: Sequence[tuple[int, int]] = ()) -> Iterator[CallRef]:
+        """Every call site under ``node``, skipping subtrees inside the ``exclude`` byte
+        ranges (definitions that are units of their own)."""
         stack = [node]
         while stack:
             n = stack.pop()
+            if any(s <= n.start_byte and n.end_byte <= e for s, e in exclude):
+                continue
             callee_field = self.calls.get(n.type)
             if callee_field is not None:
                 ref = self._call_ref(n, callee_field)
@@ -218,6 +239,10 @@ def _go_receiver(node: Node) -> tuple[str | None, str | None]:
             return _text(n), _text(var) if var is not None else None
         stack.extend(reversed(n.named_children))
     return None, None
+
+
+def _go_type_specs(node: Node) -> list[Node]:
+    return [c for c in node.named_children if c.type in ("type_spec", "type_alias")]
 
 
 def _rust_impl(node: Node) -> Definition | None:
@@ -386,7 +411,7 @@ PYTHON = LanguageSpec(
     opaque=frozenset({"lambda"}),
     calls={"call": "function"},
     self_names=frozenset({"self", "cls"}),
-    test_globs=("test_*.py", "*_test.py", "tests/*", "*/tests/*"),
+    test_globs=("test_*.py", "*_test.py", "conftest.py", "tests/*", "*/tests/*"),
     imports=_python_imports,
 )
 
@@ -456,7 +481,8 @@ JAVA = LanguageSpec(
     opaque=frozenset({"lambda_expression"}),
     calls={"method_invocation": "name", "object_creation_expression": "type"},
     self_names=frozenset({"this"}),
-    test_globs=("*Test.java", "*Tests.java", "src/test/*"),
+    implicit_self=True,
+    test_globs=("*Test.java", "*Tests.java", "src/test/*", "*/src/test/*"),
     imports=_java_imports,
 )
 

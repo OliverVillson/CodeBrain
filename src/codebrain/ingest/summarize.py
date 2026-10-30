@@ -48,13 +48,41 @@ class Summarizer(Protocol):
 
 # Heuristic
 
-_DOCSTRING = re.compile(r'^\s*[rbuRBU]?("""|\'\'\')\s*(.*?)\s*\1', re.S | re.M)
+_DOCSTRING = re.compile(r'\s*[rbuRBU]?("""|\'\'\')\s*(.*?)\s*\1', re.S)
+_PREAMBLE = re.compile(r"(?:[ \t]*(?:#[^\n]*|@[^\n]*)?\n)*")
+"""Blank, comment and decorator lines before a module's or definition's first statement."""
+_DEF = re.compile(r"[ \t]*(?:async[ \t]+)?(?:def|class)\b")
+_BRACKETS = {"(": 1, "[": 1, "{": 1, ")": -1, "]": -1, "}": -1}
 _LINE_COMMENT = re.compile(r"^\s*(?://+|#+|/\*+|\*+)\s?(.*?)\s*(?:\*/)?\s*$")
 
 
+def _body_start(text: str) -> int:
+    """Offset of the first statement: after the preamble and, for ``def``/``class``, after
+    the header line that ends in ``:`` outside brackets (signatures can span lines)."""
+    pos = _PREAMBLE.match(text).end()  # type: ignore[union-attr]
+    if not _DEF.match(text, pos):
+        return pos
+    depth = 0
+    for i in range(pos, len(text)):
+        ch = text[i]
+        depth += _BRACKETS.get(ch, 0)
+        if ch == ":" and depth == 0:
+            nl = text.find("\n", i)
+            rest = text[i + 1 : nl if nl >= 0 else len(text)].strip()
+            if not rest or rest.startswith("#"):
+                return nl + 1 if nl >= 0 else len(text)
+            return i + 1  # one-liner: ``def f(): """doc"""``
+    return len(text)
+
+
 def leading_doc(text: str) -> str | None:
-    """First sentence of the docstring or the comment block at the top of ``text``."""
-    m = _DOCSTRING.search(text[:2000])
+    """First sentence of the docstring or the comment block at the top of ``text``.
+
+    The docstring must be the first statement; a triple-quoted string further down (a
+    literal, or a nested function's docstring) is not the unit's own.
+    """
+    head = text[:2000]
+    m = _DOCSTRING.match(head, _body_start(head))
     if m and m.group(2):
         return _first_sentence(m.group(2))
     lines: list[str] = []
@@ -200,7 +228,8 @@ class AnthropicSummarizer(LLMSummarizer):
 
 # Registry
 
-SummarizerFactory = Callable[[str], Summarizer]
+SummarizerFactory = Callable[..., Summarizer]
+"""Called as ``factory(arg, **options)``, with the options ``make_summarizer`` was given."""
 _REGISTRY: dict[str, SummarizerFactory] = {}
 
 
@@ -216,7 +245,7 @@ def make_summarizer(spec: str, **options: Any) -> Summarizer:
     if prefix == "anthropic":
         return AnthropicSummarizer(arg or "claude-opus-5-5", **options)
     if prefix in _REGISTRY:
-        return _REGISTRY[prefix](arg)
+        return _REGISTRY[prefix](arg, **options)
     raise ValueError(
         f"unknown summarizer {spec!r}; known: heuristic, anthropic, {sorted(_REGISTRY)}"
     )
