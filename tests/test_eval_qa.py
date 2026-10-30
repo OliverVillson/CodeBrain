@@ -32,6 +32,22 @@ def test_both_modes_see_the_same_files() -> None:
 
 
 @pytest.mark.db
+def test_qa_k_limits_recalled_units(database_url: str, tmp_path: Path) -> None:
+    args = parser().parse_args(
+        ["qa", "--fake", "--out", str(tmp_path), "--database-url", database_url, "--qa-k", "3"]
+    )
+    try:
+        assert asyncio.run(amain(args)) == 0
+    finally:
+        with psycopg.connect(database_url, autocommit=True) as conn:
+            conn.execute("DELETE FROM units WHERE repo = 'qa-fixture/tidepool'")
+    [run] = list(tmp_path.iterdir())
+    answers = [json.loads(line) for line in (run / "qa-answers.jsonl").open()]
+    assert all(0 < len(a["recalled"]) <= 3 for a in answers if a["mode"] == "codebrain")
+    assert "top 3 results" in (run / "report.md").read_text()
+
+
+@pytest.mark.db
 def test_fake_run_writes_report(database_url: str, tmp_path: Path) -> None:
     args = parser().parse_args(
         ["qa", "--fake", "--out", str(tmp_path), "--database-url", database_url]
@@ -52,4 +68,5 @@ def test_fake_run_writes_report(database_url: str, tmp_path: Path) -> None:
     assert codebrain["recall_seconds"] > 0 and normal["recall_seconds"] < 0.01
     answers = [json.loads(line) for line in (run / "qa-answers.jsonl").open()]
     assert all(a["recalled"] for a in answers if a["mode"] == "codebrain")
+    assert all("@" in c for a in answers for c in a["recalled"])
     assert "Codebase Q&A" in (run / "report.md").read_text()
