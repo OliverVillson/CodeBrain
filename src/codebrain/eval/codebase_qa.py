@@ -297,7 +297,14 @@ class StoreRecall:
     """``ContextBroker.recall`` over the ingested repo, without writing retrieval logs
     (so one question's recall cannot change the next one's ranking)."""
 
-    def __init__(self, database_url: str, repo: str, encoder: QueryEmbedder, budget: int) -> None:
+    def __init__(
+        self,
+        database_url: str,
+        repo: str,
+        encoder: QueryEmbedder,
+        budget: int,
+        k: int | None = None,
+    ) -> None:
         from codebrain.models import VectorView
         from codebrain.retrieval import ContextBroker
         from codebrain.retrieval.search import Filters
@@ -309,10 +316,13 @@ class StoreRecall:
         )
         self.filters = Filters(repo=repo)
         self.budget = budget
+        self.k = k
 
     def __call__(self, question: str) -> tuple[str, list[str]]:
-        result = self.broker.recall(question, self.budget, filters=self.filters, log=False)
-        return result.render(), [u.citation for u in result.units]
+        result = self.broker.recall(
+            question, self.budget, k=self.k, filters=self.filters, log=False
+        )
+        return result.render(), [f"{u.citation}@{u.resolution}" for u in result.units]
 
     def close(self) -> None:
         self.conn.close()
@@ -341,8 +351,9 @@ def render_section(r: dict[str, Any]) -> list[str]:
         "",
         f"Codebase `{r['codebase']}`: {r['files']} files, {r['codebase_tokens']:,} tokens. "
         f"{len(r['questions'])} questions, asked one at a time. Normal puts the whole codebase "
-        f"in the prompt; CodeBrain recalls up to {r['budget']:,} tokens per question. "
-        f"{cache}",
+        f"in the prompt; CodeBrain recalls up to {r['budget']:,} tokens per question"
+        + (f" from its top {r['k']} results. " if r.get("k") else ". ")
+        + f"{cache}",
         "",
         f"CodeBrain ingest ran first and is **not** in the timings: {ing['seconds']:.1f}s for "
         f"{ing['units']} units, {ing['summaries']} summaries ({ing['summarizer']}), "

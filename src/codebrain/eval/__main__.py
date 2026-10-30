@@ -277,7 +277,11 @@ async def cmd_qa(args: argparse.Namespace, out: Path, llm: LLM) -> dict[str, Any
     )
     log(f"qa: ingest took {stats.seconds:.1f}s, {stats.units} units")
     recall = qa.StoreRecall(
-        args.database_url, repo, qa.QueryEmbedder(inner, query=True), args.qa_budget
+        args.database_url,
+        repo,
+        qa.QueryEmbedder(inner, query=True),
+        args.qa_budget,
+        args.qa_k,
     )
 
     def whole_codebase(_: str) -> tuple[str, list[str]]:
@@ -321,6 +325,7 @@ async def cmd_qa(args: argparse.Namespace, out: Path, llm: LLM) -> dict[str, Any
         "files": len(files),
         "codebase_tokens": codebase_tokens,
         "budget": args.qa_budget,
+        "k": args.qa_k,
         "warm_cache": args.qa_warm_cache,
         "questions": [q.id for q in questions],
         "ingest": dataclasses.asdict(stats),
@@ -433,6 +438,7 @@ def parser() -> argparse.ArgumentParser:
     g.add_argument("--qa-codebase", default=str(qa.DEFAULT_CODEBASE))
     g.add_argument("--qa-questions", default=str(qa.DEFAULT_QUESTIONS))
     g.add_argument("--qa-budget", type=int, default=4_000, help="recall token budget")
+    g.add_argument("--qa-k", type=int, default=None, help="pack only the top k recall results")
     g.add_argument("--qa-max-tokens", type=int, default=600, help="answer length cap")
     g.add_argument("--qa-summarizer", choices=["llm", "heuristic"], default="llm")
     g.add_argument("--qa-warm-cache", action="store_true", help="let the prefix cache be reused")
