@@ -380,6 +380,12 @@ class Ingestor:
         out: list[UnitVector] = []
         for view, embedder in self.embedders.items():
             queue: list[tuple[str, str, str]] = []  # unit id, input, content hash
+            # One query for every stored vector hash, not one per unit.
+            known = self.store.vector_hashes(
+                [uid for w in work if not w.force for uid in w.units if uid in w.old],
+                view,
+                embedder.model,
+            )
             for w in work:
                 for uid, u in w.units.items():
                     text = embedding_input(u, view)
@@ -387,7 +393,7 @@ class Ingestor:
                     if w.force:
                         queue.append((uid, text, ch))
                         continue
-                    if uid in w.old and self.store.vector_hash(uid, view, embedder.model) == ch:
+                    if uid in w.old and known.get(uid) == ch:
                         report.vectors_reused += 1
                         continue
                     found = self.store.find_vector(view, embedder.model, ch)

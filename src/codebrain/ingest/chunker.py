@@ -14,6 +14,9 @@ Size rules, with t(u) the token count:
 * A run of adjacent small functions (each < τ_min) is merged into one unit named
   ``first..last`` until the run reaches τ_min. Lone small functions stay as they
   are: there is nothing to merge them with without changing a sibling's identity.
+* A module with definitions also gets a ``path#body`` unit holding its top-level
+  statements other than imports and definitions: constants, settings, registries.
+  Showing one constant otherwise meant showing the whole module (or its skeleton).
 
 ``ast_hash`` hashes node types and leaf tokens with comments dropped, so
 whitespace and comment edits do not count as changes.
@@ -105,6 +108,8 @@ def ast_hash(nodes: Iterable[Node], comments: frozenset[str]) -> str:
 
 
 _COMMENT_STARTS = ("#", "//", "/*", "*")
+BODY_MIN_TOKENS = 12
+"""A module body smaller than this (``__all__ = [...]`` alone) is not worth a unit."""
 _CLOSING = {"}", "};", "})", "end", ")"}
 
 
@@ -144,10 +149,11 @@ class Chunker:
         for c in children:
             if c.depth == 1:
                 c.parent = module.qualified_name
+        body = self._module_body(f, loose) if children else None
         return ParsedFile(
             path=path,
             language=spec.name,
-            chunks=[module, *children],
+            chunks=[module, *([body] if body else []), *children],
             imports=list(spec.imports(root)),
             has_errors=root.has_error,
             is_test=spec.is_test_path(path),
@@ -220,6 +226,52 @@ class Chunker:
                 seen.add(id(run))
                 keep.append(run)
         return keep
+
+    def _module_body(self, f: _FileCtx, loose: list[Node]) -> Chunk | None:
+        """The ``path#body`` unit: a module's loose statements without imports or anything
+        holding a definition. ``None`` when that leaves next to nothing."""
+        keep = [
+            n
+            for n in loose
+            if "import" not in n.type
+            and n.type != "use_declaration"
+            and next(iter(f.spec.definitions(n)), None) is None
+        ]
+        spans: list[tuple[int, int]] = []
+        for n in keep:
+            s, e = _lines(n)
+            if spans and s <= spans[-1][1] + 1:
+                spans[-1] = (spans[-1][0], max(e, spans[-1][1]))
+            else:
+                spans.append((s, e))
+        if not spans:
+            return None
+        parts: list[str] = []
+        for i, (s, e) in enumerate(spans):
+            if i and not f.only_trivia(spans[i - 1][1] + 1, s - 1):
+                parts.append("...")
+            parts.append(f.slice(s, e))
+        text = "\n".join(parts)
+        tokens = self.count(text)
+        if tokens < BODY_MIN_TOKENS or not any(_substantive(n) for n in keep):
+            return None
+        labels: dict[str, Any] = {"body": True}
+        if tokens > self.tau_max:
+            text = self._truncate(text)
+            tokens = self.count(text)
+            labels["truncated"] = True
+        return Chunk(
+            kind=UnitKind.MODULE,
+            qualified_name=f"{f.path}#body",
+            start_line=spans[0][0],
+            end_line=spans[-1][1],
+            text=text,
+            tokens=tokens,
+            ast_hash=ast_hash(keep, f.spec.comments),
+            depth=1,
+            parent=f.path,
+            labels=labels,
+        )
 
     def _function(
         self, f: _FileCtx, d: Definition, kind: UnitKind, qn: str, scope: str | None, depth: int
@@ -544,6 +596,16 @@ def _lines(node: Node) -> tuple[int, int]:
     if node.end_point[1] == 0 and end > start:  # ends at the start of the next line
         end -= 1
     return start, end
+
+
+def _substantive(node: Node) -> bool:
+    """Not a comment or a bare string (a docstring)."""
+    if node.type in ("comment", "string", "line_comment", "block_comment"):
+        return False
+    named = node.named_children
+    return not (
+        node.type == "expression_statement" and len(named) == 1 and named[0].type == "string"
+    )
 
 
 def _indent(line: str) -> str:

@@ -61,6 +61,12 @@ class IngestStore(Protocol):
 
     def vector_hash(self, unit_id: str, view: VectorView, model: str) -> str | None: ...
 
+    def vector_hashes(
+        self, unit_ids: Sequence[str], view: VectorView, model: str
+    ) -> dict[str, str | None]:
+        """``vector_hash`` for many units in one round trip (units without one left out)."""
+        ...
+
     def find_vector(self, view: VectorView, model: str, content_hash: str) -> list[float] | None:
         """Any stored embedding of the same input, to reuse instead of re-embedding."""
         ...
@@ -122,6 +128,16 @@ class PostgresStore:
             (unit_id, view, model),
         ).fetchone()
         return row[0] if row else None
+
+    def vector_hashes(
+        self, unit_ids: Sequence[str], view: VectorView, model: str
+    ) -> dict[str, str | None]:
+        rows = self.conn.execute(
+            "SELECT unit_id, content_hash FROM unit_vectors "
+            "WHERE unit_id = ANY(%s) AND view = %s AND model = %s",
+            (list(unit_ids), view, model),
+        ).fetchall()
+        return {r[0]: r[1] for r in rows}
 
     def find_vector(self, view: VectorView, model: str, content_hash: str) -> list[float] | None:
         row = self.conn.execute(
@@ -228,6 +244,15 @@ class MemoryStore:
     def vector_hash(self, unit_id: str, view: VectorView, model: str) -> str | None:
         v = self.vectors.get((unit_id, view, model))
         return v.content_hash if v else None
+
+    def vector_hashes(
+        self, unit_ids: Sequence[str], view: VectorView, model: str
+    ) -> dict[str, str | None]:
+        return {
+            uid: v.content_hash
+            for uid in unit_ids
+            if (v := self.vectors.get((uid, view, model))) is not None
+        }
 
     def find_vector(self, view: VectorView, model: str, content_hash: str) -> list[float] | None:
         for (_, v_view, v_model), v in self.vectors.items():
