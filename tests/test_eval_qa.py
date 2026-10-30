@@ -199,3 +199,56 @@ def test_recall_only_run_reports_gold_files(database_url: str, tmp_path: Path) -
     assert "CodeBrain recall only" in report and "gold files recalled" in report
     answers = [json.loads(line) for line in (run / "qa-answers.jsonl").open()]
     assert all(a["mode"] == "codebrain" and a["recall_timings"] for a in answers)
+
+
+@pytest.mark.db
+def test_stopped_run_resumes_without_reingesting(
+    database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ask, calls = qa.ask, 0
+
+    async def stopped_ask(*args: object, **kwargs: object) -> qa.Answer:
+        nonlocal calls
+        calls += 1
+        if calls == 25:
+            raise KeyboardInterrupt
+        return await ask(*args, **kwargs)  # type: ignore[arg-type]
+
+    def no_ingest(*_: object) -> qa.IngestStats:
+        raise AssertionError("a resumed run reuses the index")
+
+    argv = ["qa", "--fake", "--out", str(tmp_path), "--database-url", database_url]
+    try:
+        monkeypatch.setattr(qa, "ask", stopped_ask)
+        with pytest.raises(KeyboardInterrupt):
+            asyncio.run(amain(parser().parse_args(argv)))
+        [run] = list(tmp_path.iterdir())
+        progress = run / "qa-progress.jsonl"
+        first = progress.read_text().splitlines()
+        assert len(first) == 24 and not (run / "qa-answers.jsonl").exists()
+        # A line cut off mid-write by the interrupt is skipped, and that question asked again.
+        progress.write_text("\n".join(first) + '\n{"question_id": "tp-')
+
+        monkeypatch.setattr(qa, "ask", ask)
+        monkeypatch.setattr(qa, "ingest_codebase", no_ingest)
+        assert asyncio.run(amain(parser().parse_args([*argv, "--qa-resume", "last"]))) == 0
+    finally:
+        with psycopg.connect(database_url, autocommit=True) as conn:
+            conn.execute("DELETE FROM units WHERE repo = 'qa-fixture/tidepool'")
+    assert list(tmp_path.iterdir()) == [run]
+    answers = [json.loads(line) for line in (run / "qa-answers.jsonl").open()]
+    assert [(a["mode"], a["question_id"]) for a in answers] == [
+        (m, q.id) for m in qa.MODES for q in qa.load_questions(qa.DEFAULT_QUESTIONS)[:40]
+    ]
+    assert [json.loads(line) for line in first] == answers[:24]
+    res = json.loads((run / "results.json").read_text())["qa"]
+    assert res["summary"]["codebrain"]["questions"] == 40 and res["ingest"]["units"] > 50
+
+
+def test_resume_needs_a_run_with_progress(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit, match="no run"):
+        asyncio.run(
+            amain(
+                parser().parse_args(["qa", "--fake", "--out", str(tmp_path), "--qa-resume", "last"])
+            )
+        )

@@ -44,6 +44,17 @@ sudo when you are not in the docker group. vLLM runs with `--enforce-eager` unle
 set `VLLM_ARGS` (CUDA graph capture has failed on the B300). Detach from tmux with
 `Ctrl-b d` and come back with `tmux attach -t eval`.
 
+If a Q&A run stops partway (Ctrl+C, a crash, the VM restarting), continue it with the
+same flags plus `--qa-resume last` (or `--qa-resume eval-results/<timestamp>`), for
+example `eval/b300/qa.sh --qa-budget 8000 --qa-resume last`. Every answer is saved to
+`qa-progress.jsonl` as soon as it exists, so the rerun reuses the run's directory and
+its ingested index and asks only the questions that were not answered yet. The judge
+and the report then cover all the answers. If the index is gone or was rebuilt (another
+run ingested the same codebase with a different embedder, or Postgres was reset), the
+rerun ingests again and asks the CodeBrain questions again, keeping the no-memory
+answers. The run header's LLM token totals count only the resumed part; the per-mode
+tables come from the saved answers and cover the whole run.
+
 `run.sh` starts Postgres (`db.sh`, via `docker compose`) and vLLM if they are not
 already up, then runs everything. `eval/b300/qa.sh` runs only the codebase Q&A
 benchmark. Results go
@@ -57,6 +68,7 @@ to `eval-results/<timestamp>/`:
 | `rankings-<model>.jsonl` | Top 20 per task, query variant and config, for digging into misses. |
 | `paging-probes.jsonl` | Every probe with arm, distance, answer and whether it was right. |
 | `qa-answers.jsonl` | Every Q&A answer with mode, timings, tokens, missing facts, judge verdict and recalled units. |
+| `qa-progress.jsonl`, `qa-ingest.json` | Answers saved as they arrive and the ingest stats, for `--qa-resume`. |
 
 Set `EXTRA_REPO` to one of your own repos with real history. Public repos like httpx and
 click are probably in the model's training data, so your own repo is the
