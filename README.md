@@ -30,9 +30,9 @@ database.
 | `codebrain/config.py` | all | `Settings` (env prefix `CODEBRAIN_`) and every tunable constant from the sketch, grouped by section. |
 | `codebrain/store/` | §2, §6, §10 | Postgres + pgvector. `migrations/` (SQL), `migrate.py` (runner), `db.py` (connections), `repo.py` (basic reads and writes shared by every writer). |
 | `codebrain/ingest/` | §3, §4, §5 | Repo to units: tree-sitter parse, AST chunking within τ bounds, AST hashing, LLM summaries, embeddings, layer and capability classification, call/import/contains edges. *(next)* |
-| `codebrain/retrieval/` | §6, §7 | The context broker: hybrid search over the three views, RRF, personalized PageRank, stage-2 scoring, MMR, knapsack packing. *(next)* |
+| `codebrain/retrieval/` | §6, §7 | The context broker. `ContextBroker(conn, encoders).recall(query, budget)` and `.explain(query, unit_id)`. Modules: `search` (three indexes, `Filters`), `fusion` (RRF), `graph` (personalized PageRank), `scoring` (S(u\|q) and `ScoreBreakdown`), `mmr`, `pack` (resolution knapsack and rendering), `encoders` (the `Embedder` protocol for query vectors). |
 | `codebrain/server/` | §10 | MCP server (stdio) with `recall`, `remember`, `explain`, `ingest`, `status`. `schemas.py` (tool inputs and outputs), `backend.py` (the `MemoryBackend` protocol the tools call), `memory.py` (in-memory fake), `app.py` (tools). See [Connecting an agent](#connecting-an-agent). |
-| write-back and paging | §8, §9 | Episode distilling, duplicate merge, usage credit, and window eviction to turn units. Expected to live in `codebrain/memory/` (not created yet). *(next)* |
+| `codebrain/memory/` | §8, §9 | Write-back and paging. `EpisodeRecorder.record(TaskRecord)` writes an episode unit (merged into a near-duplicate above θ_dup), decision units, `produced_by` edges to the code units in the diff, and usage credit for recalled units the task reused. `SessionTracker` is the harness API for a live window: it pins task facts and pages the oldest turns out to session-namespace `turn` units past 70%, down to 50%. Embedding, distilling and storage are protocols in `memory/interfaces.py`; `PgMemoryStore` backs them with Postgres. |
 | `codebrain/cli.py` | | `codebrain migrate`; other commands get added here. |
 
 ## Connecting an agent
@@ -75,7 +75,7 @@ Defined in `src/codebrain/store/migrations/0001_init.sql`.
 | `units.lexical` | §4 | Generated `tsvector` over `lexical_terms` (split identifiers, weight A) and `summary` (weight B). Stands in for BM25 until a real BM25 is added. |
 | `unit_vectors` | §4 | One row per (unit, view, model). Views are `summary` (s_u) and `code` (c_u). The column is untyped `vector` because models are undecided; build an HNSW index per model once one is picked (example in the migration). `content_hash` lets ingest reuse vectors for unchanged code. |
 | `edges` | §6 | Typed directed edges. `NULL` weight means the default for the type (`EdgeType.default_weight`). Cascade on unit delete. |
-| `episodes` | §8 | Raw evidence (prompt, plan, diff, test results) behind an `episode` unit. |
+| `episodes` | §8 | Raw evidence (prompt, plan, diff, test results) behind an `episode` unit. One row per run: a merged near-duplicate adds a row instead of overwriting (`0002_episode_runs.sql`). |
 | `retrievals` | §8 | Every recalled unit with its stage-2 features, for usage credit and learning weights. |
 
 ## Working on this in parallel
@@ -88,6 +88,27 @@ Defined in `src/codebrain/store/migrations/0001_init.sql`.
   `store/repo.py`. Search queries live in `retrieval/`, not in `store/`.
 - CI runs ruff, `ruff format --check`, mypy (strict) and pytest against
   `pgvector/pgvector:pg16`.
+
+## Recall
+
+```python
+from codebrain.retrieval import ContextBroker, Filters
+from codebrain.models import VectorView
+
+broker = ContextBroker(conn, {VectorView.SUMMARY: text_embedder, VectorView.CODE: code_embedder})
+result = broker.recall(
+    "Create a rate limiter for the public API",
+    budget=4000,
+    filters=Filters(repo="demo", session_id="s1"),
+)
+print(result.render())  # cited context block, packed to the budget
+broker.explain(result.query, "u_...", budget=4000)  # per-feature score breakdown and stage trace
+```
+
+An embedder is anything with a `model` id and `embed(texts) -> list[list[float]]`; it
+must be the model ingest used for that view. Views without one are skipped, so
+`ContextBroker(conn)` gives lexical plus graph recall. `recall` logs what it returns to
+`retrievals` (pass `log=False` to skip) inside the caller's transaction.
 
 ## Open decisions
 
