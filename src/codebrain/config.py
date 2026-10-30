@@ -19,6 +19,35 @@ class ChunkingParams(BaseModel):
 
     tau_min: int = 64
     tau_max: int = 1200
+    max_file_bytes: int = 1_000_000
+    prompt_globs: list[str] = [
+        "prompts/**",
+        "**/prompts/**",
+        "**/*.prompt",
+        "**/*.prompt.md",
+        "**/CLAUDE.md",
+        "**/AGENTS.md",
+    ]
+    exclude_globs: list[str] = [
+        "**/node_modules/**",
+        "**/.venv/**",
+        "**/venv/**",
+        "**/vendor/**",
+        "**/dist/**",
+        "**/build/**",
+        "**/target/**",
+        "**/*.min.js",
+        "**/*_pb2.py",
+    ]
+
+
+class SummaryParams(BaseModel):
+    """Sketch §3: ``heuristic`` (no model), ``anthropic`` or ``anthropic:<model id>``."""
+
+    model: str = "heuristic"
+    effort: str = "low"
+    max_tokens: int = 2048
+    concurrency: int = 4
 
 
 class EmbeddingParams(BaseModel):
@@ -28,6 +57,7 @@ class EmbeddingParams(BaseModel):
     code_model: str = "unset-code-model"
     dim: int = 1024
     prefilter_dim: int = 256
+    batch_size: int = 64
 
 
 class ClassificationParams(BaseModel):
@@ -44,6 +74,12 @@ class GraphParams(BaseModel):
 
     ppr_beta: float = 0.5
     similar_to_threshold: float = 0.85
+    ppr_hops: int = 2
+    """How far from the seed hits edges are loaded for the walk."""
+    ppr_iterations: int = 50
+    ppr_tolerance: float = 1e-6
+    expand_keep: int = 20
+    """Graph neighbours (not found by any index) added to the candidates, by PageRank."""
 
 
 class RetrievalParams(BaseModel):
@@ -72,6 +108,8 @@ class WriteBackParams(BaseModel):
     """Sketch §8."""
 
     dup_threshold: float = 0.92
+    min_reference_length: int = 3
+    """Shortest identifier that counts as a call or import of a recalled unit in a diff."""
 
 
 class PagingParams(BaseModel):
@@ -81,6 +119,10 @@ class PagingParams(BaseModel):
     low_water: float = 0.50
     session_weight: float = 1.2
     session_half_life_hours: float = 2.0
+    keep_recent_turns: int = 2
+    """Turns at the end of the window that are never evicted, however full it is."""
+    turn_unit_max_tokens: int = 1200
+    """Evicted turns are grouped into turn units of at most this size (τ_max, §3)."""
 
 
 class Settings(BaseSettings):
@@ -91,6 +133,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql://codebrain:codebrain@localhost:5432/codebrain"
 
     chunking: ChunkingParams = ChunkingParams()
+    summary: SummaryParams = SummaryParams()
     embedding: EmbeddingParams = EmbeddingParams()
     classification: ClassificationParams = ClassificationParams()
     graph: GraphParams = GraphParams()

@@ -7,6 +7,7 @@ and ranking queries belong in ``codebrain.retrieval``.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from datetime import datetime
 from typing import Any
 
 import numpy as np
@@ -16,12 +17,17 @@ from psycopg.types.json import Jsonb
 
 from codebrain.models import Edge, Episode, Retrieval, Span, Unit, UnitVector
 
-_UNIT_COLUMNS = (
+UNIT_COLUMNS = (
     "id, kind, namespace, repo, session_id, path, qualified_name, language, start_line, "
     "end_line, parent_id, text, summary, signature, lexical_terms, ast_hash, tokens, layer, "
     "layer_confidence, capabilities, labels, validity, retrieved_count, used_count, version, "
     "created_at, updated_at"
 )
+
+
+def unit_columns(alias: str) -> str:
+    """``UNIT_COLUMNS`` qualified with a table alias, for queries that join ``units``."""
+    return ", ".join(f"{alias}.{c}" for c in UNIT_COLUMNS.split(", "))
 
 
 def _unit_params(u: Unit) -> dict[str, Any]:
@@ -65,7 +71,8 @@ def upsert_unit(conn: psycopg.Connection, unit: Unit) -> None:
     )
 
 
-def _row_to_unit(row: dict[str, Any]) -> Unit:
+def row_to_unit(row: dict[str, Any]) -> Unit:
+    """Build a ``Unit`` from a ``dict_row`` holding ``UNIT_COLUMNS``. Consumes the row."""
     start, end = row.pop("start_line"), row.pop("end_line")
     row["span"] = Span(start_line=start, end_line=end) if start is not None else None
     return Unit.model_validate(row)
@@ -73,8 +80,8 @@ def _row_to_unit(row: dict[str, Any]) -> Unit:
 
 def get_unit(conn: psycopg.Connection, unit_id: str) -> Unit | None:
     with conn.cursor(row_factory=dict_row) as cur:
-        row = cur.execute(f"SELECT {_UNIT_COLUMNS} FROM units WHERE id = %s", (unit_id,)).fetchone()
-    return _row_to_unit(row) if row else None
+        row = cur.execute(f"SELECT {UNIT_COLUMNS} FROM units WHERE id = %s", (unit_id,)).fetchone()
+    return row_to_unit(row) if row else None
 
 
 def delete_unit(conn: psycopg.Connection, unit_id: str) -> None:
@@ -187,4 +194,70 @@ def credit_used(conn: psycopg.Connection, unit_ids: Iterable[str]) -> None:
     """Bump ``used_count`` for units that made it into the final diff (sketch §8)."""
     conn.execute(
         "UPDATE units SET used_count = used_count + 1 WHERE id = ANY(%s)", (list(unit_ids),)
+    )
+
+
+# Write-back (sketch §8) ---------------------------------------------------------------
+
+
+def get_units(conn: psycopg.Connection, unit_ids: Iterable[str]) -> dict[str, Unit]:
+    ids = list(dict.fromkeys(unit_ids))
+    if not ids:
+        return {}
+    with conn.cursor(row_factory=dict_row) as cur:
+        rows = cur.execute(
+            f"SELECT {UNIT_COLUMNS} FROM units WHERE id = ANY(%s)", (ids,)
+        ).fetchall()
+    return {u.id: u for u in map(row_to_unit, rows)}
+
+
+def episodes_for(conn: psycopg.Connection, unit_id: str) -> list[Episode]:
+    """Every run recorded against an episode unit, oldest first."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        rows = cur.execute(
+            "SELECT unit_id, session_id, prompt, plan, diff, test_results, tests_passed, "
+            "pitfalls, started_at, ended_at FROM episodes WHERE unit_id = %s ORDER BY ended_at",
+            (unit_id,),
+        ).fetchall()
+    return [Episode.model_validate(r) for r in rows]
+
+
+def open_retrievals(
+    conn: psycopg.Connection, session_id: str, since: datetime | None = None
+) -> list[Retrieval]:
+    """Retrievals in a session that have not been judged used or unused yet."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        rows = cur.execute(
+            "SELECT id, query, unit_id, session_id, rank, score, resolution, features, used, "
+            "created_at FROM retrievals WHERE session_id = %s AND used IS NULL "
+            "AND (%s::timestamptz IS NULL OR created_at >= %s) ORDER BY id",
+            (session_id, since, since),
+        ).fetchall()
+    return [Retrieval.model_validate(r) for r in rows]
+
+
+def mark_retrievals(conn: psycopg.Connection, used: dict[int, bool]) -> None:
+    """Set the ``used`` label on logged retrievals, the training label for weights."""
+    with conn.cursor() as cur:
+        cur.executemany(
+            "UPDATE retrievals SET used = %s WHERE id = %s", [(v, k) for k, v in used.items()]
+        )
+
+
+def add_usage(conn: psycopg.Connection, unit_id: str, *, retrieved: int, used: int) -> None:
+    """Add to a unit's counters. ``used_count`` never passes ``retrieved_count``."""
+    conn.execute(
+        """
+        UPDATE units SET retrieved_count = retrieved_count + %(r)s,
+            used_count = LEAST(used_count + %(u)s, retrieved_count + %(r)s)
+        WHERE id = %(id)s
+        """,
+        {"id": unit_id, "r": retrieved, "u": used},
+    )
+
+
+def set_validity(conn: psycopg.Connection, unit_ids: Iterable[str], validity: float) -> None:
+    conn.execute(
+        "UPDATE units SET validity = %s, updated_at = now() WHERE id = ANY(%s)",
+        (validity, list(unit_ids)),
     )
