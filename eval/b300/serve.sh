@@ -15,6 +15,9 @@ esac
 # Anything in VLLM_ARGS is passed through, e.g. VLLM_ARGS="--kv-cache-dtype fp8".
 read -r -a USER_ARGS <<<"${VLLM_ARGS:-}"
 
+# vLLM JIT-compiles some kernels at runtime with ninja (and nvcc), which it looks up on PATH.
+export PATH="$PWD/.venv-eval/bin:$PATH"
+
 # On a single GPU, leave room for the embedding model that runs in the eval process.
 CUDA_VISIBLE_DEVICES="${LLM_GPUS:-0}" nohup .venv-eval/bin/vllm serve "$MODEL" \
   --port "$PORT" \
