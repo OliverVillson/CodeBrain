@@ -6,6 +6,9 @@ This is a multiple-choice knapsack. ``pack`` uses the standard greedy on the
 LP relaxation: per unit, keep the options on the upper convex hull of
 (tokens, value), turn them into upgrade steps (signature -> summary -> full),
 and take steps in order of value gained per token while they fit.
+
+``pack_depth_first`` first gives the leading candidates their full text, in order,
+and runs the knapsack on the rest of the budget.
 """
 
 from __future__ import annotations
@@ -141,3 +144,21 @@ def pack(candidates: Mapping[str, Sequence[Option]], budget: int) -> dict[str, O
         used += extra
         chosen[uid] = i
     return {uid: hulls[uid][i] for uid, i in chosen.items()}
+
+
+def pack_depth_first(
+    candidates: Mapping[str, Sequence[Option]], budget: int, full_first: int
+) -> dict[str, Option]:
+    """Give the first ``full_first`` candidates (in mapping order) their full option while
+    it fits, then ``pack`` the others into what is left. A leading candidate whose full
+    text does not fit goes to the knapsack with the rest."""
+    chosen: dict[str, Option] = {}
+    used = 0
+    for uid, opts in list(candidates.items())[:full_first]:
+        full = next((o for o in opts if o.resolution is Resolution.FULL), None)
+        if full is not None and used + full.tokens <= budget:
+            chosen[uid] = full
+            used += full.tokens
+    rest = {uid: opts for uid, opts in candidates.items() if uid not in chosen}
+    chosen.update(pack(rest, budget - used))
+    return chosen

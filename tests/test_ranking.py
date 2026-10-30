@@ -121,6 +121,26 @@ def test_pack_respects_budget_and_upgrades_best_first() -> None:
     assert pack.pack(cands, 0) == {}
 
 
+def test_pack_depth_first_gives_leading_units_full_code() -> None:
+    big = _unit(id="big", text="x = 1\n" * 260, signature="def big()", summary="Big.", tokens=390)
+    small = _unit(id="small", text="y = 2\n" * 30, signature="def small()", summary="S.", tokens=45)
+    cands = {"big": pack.options(big, 0.9), "small": pack.options(small, 0.5)}
+    full = {u: next(o.tokens for o in cands[u] if o.resolution is Resolution.FULL) for u in cands}
+    budget = full["big"] + full["small"] - 1
+    # By value per token the knapsack summarises "big" to afford "small" in full.
+    assert pack.pack(cands, budget)["big"].resolution is not Resolution.FULL
+
+    depth = pack.pack_depth_first(cands, budget, full_first=1)
+    assert depth["big"].resolution is Resolution.FULL
+    assert depth["small"].resolution is not Resolution.FULL  # what is left goes to the knapsack
+    assert sum(o.tokens for o in depth.values()) <= budget
+
+    # A leading unit whose full text cannot fit is packed smaller instead of skipped.
+    tight = pack.pack_depth_first(cands, full["big"] - 1, full_first=1)
+    assert tight["big"].resolution is not Resolution.FULL
+    assert pack.pack_depth_first(cands, budget, full_first=0) == pack.pack(cands, budget)
+
+
 def test_pack_prices_every_resolution_on_one_scale() -> None:
     # A short unit with a long summary: its full text is the cheaper view, whatever
     # ``unit.tokens`` says (it came from another counter).
