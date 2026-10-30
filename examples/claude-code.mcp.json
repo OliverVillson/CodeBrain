@@ -1,0 +1,21 @@
+{
+  "mcpServers": {
+    "codebrain": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "/path/to/CodeBrain",
+        "python",
+        "-m",
+        "codebrain.server",
+        "--backend",
+        "memory"
+      ],
+      "env": {
+        "CODEBRAIN_DATABASE_URL": "postgresql://codebrain:codebrain@localhost:5432/codebrain"
+      }
+    }
+  }
+}
