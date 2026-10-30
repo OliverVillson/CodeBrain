@@ -13,7 +13,7 @@ with open-weight models:
   asks about them at the end under three arms: full transcript, LLM compaction, and
   paging with recall. Same window and memory budget for both memory arms.
 - **Q4** timings and token counts are logged along the way.
-- **Codebase Q&A, normal vs CodeBrain.** Ten questions about a fixture codebase,
+- **Codebase Q&A, normal vs CodeBrain.** 100 questions about a fixture codebase,
   answered once with the whole codebase in the prompt (normal) and once with
   `ContextBroker.recall` over the ingested codebase (codebrain). Reports correctness,
   wall-clock time and tokens per question and in total. See below.
@@ -76,14 +76,18 @@ eval/b300/qa.sh                     # or: python -m codebrain.eval qa --fake  (C
 
 The codebase is `eval/fixtures/tidepool`, a job queue library (about 2,200 lines, 25
 files, roughly 20k tokens) written for this benchmark, so no model has seen it in
-training. The questions and reference answers are in `eval/fixtures/tidepool-questions.json`.
-Each needs specific names and numbers, often from more than one file, and several have a
+training. The questions and reference answers are in `eval/fixtures/tidepool-questions.json`:
+40 about tidepool and 20 each about rq, huey and arq (below). Each needs specific names and numbers, often from more than one file, and several have a
 look-alike elsewhere in the code (for example the webhook retry schedule versus the job
 retry backoff).
 
 `qa.sh` also mixes in about 130k tokens of real job-queue libraries (rq, huey and arq at
 pinned commits, without their tests or docs) under `libs/`, so the codebase is about
-150k tokens and the ten questions get a prefix naming the package they are about. These
+150k tokens. Every question gets a prefix naming the package it is about, and the report
+breaks correctness down per package. Which library files go in is decided by a fixed
+4-characters-per-token estimate, not the model's tokenizer, so the 60 library questions
+always target files that are present; a library question whose package is not mixed in
+(for example with `HAYSTACK=0`, which asks only the 40 tidepool ones) is skipped. These
 libraries cover the same ground (retries, backoff, rate limits, scheduling), so they are
 look-alikes for retrieval, and at this size the full codebase no longer costs nothing
 to read. `HAYSTACK=0 eval/b300/qa.sh` runs the bare fixture; `--qa-haystack URL@REF`

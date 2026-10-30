@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Codebase Q&A benchmark only: ten questions about eval/fixtures/tidepool, answered with
-# the whole codebase in the prompt (normal) and with CodeBrain recall (codebrain).
+# Codebase Q&A benchmark only: 100 questions (40 on eval/fixtures/tidepool, 20 each on
+# rq, huey and arq), answered with the whole codebase in the prompt (normal) and with
+# CodeBrain recall (codebrain).
 # Ingest runs first and is not timed. Extra arguments go to `python -m codebrain.eval qa`,
 # e.g. --qa-budget 8000 or --qa-warm-cache.
 #
 # By default about 130k tokens of real job-queue libraries (rq, huey, arq) are added next
-# to the fixture, so the codebase is ~150k tokens. HAYSTACK=0 runs the bare fixture.
+# to the fixture, so the codebase is ~150k tokens. HAYSTACK=0 runs the bare fixture and
+# only the 40 tidepool questions.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
