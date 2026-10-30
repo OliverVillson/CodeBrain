@@ -41,15 +41,18 @@ class Embedder(Protocol):
 class HashEmbedder:
     """Hashed bag of split identifiers. Deterministic, no model, for smoke tests only."""
 
-    def __init__(self, dim: int = 512) -> None:
-        self.name = f"fake-hash-{dim}"
+    def __init__(self, dim: int = 512, salt: str = "") -> None:
+        """A ``salt`` gives a different (equally good) hash, so fake runs can compare two
+        "models"."""
+        self.name = f"fake-hash-{dim}" + (f"-{salt}" if salt else "")
         self.dim = dim
+        self.salt = salt
 
     def embed(self, texts: Sequence[str], *, query: bool) -> Vectors:
         out = np.zeros((len(texts), self.dim), dtype=np.float32)
         for i, t in enumerate(texts):
             for tok in split_identifiers(t):
-                h = int.from_bytes(hashlib.md5(tok.encode()).digest()[:4], "little")
+                h = int.from_bytes(hashlib.md5((self.salt + tok).encode()).digest()[:4], "little")
                 out[i, h % self.dim] += 1.0
         return _normalize(out)
 

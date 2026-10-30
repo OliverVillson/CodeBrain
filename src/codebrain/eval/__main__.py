@@ -61,7 +61,9 @@ def make_llm(args: argparse.Namespace) -> LLM:
 
 def make_embedder(name: str, args: argparse.Namespace) -> Embedder:
     if args.fake:
-        return HashEmbedder()
+        # One fake model per distinct --embed-model, so fake runs can compare embedders.
+        first = not args.embed_model or name == args.embed_model[0]
+        return HashEmbedder(salt="" if first else name.replace("/", "-"))
     from codebrain.eval.backends import STEmbedder
 
     return STEmbedder(name, batch_size=args.embed_batch, trust_remote_code=args.trust_remote_code)
@@ -326,16 +328,14 @@ async def cmd_qa(args: argparse.Namespace, out: Path, llm: LLM) -> dict[str, Any
         ("normal", whole_codebase),
         ("codebrain", recall),
     )
+    embedders: list[dict[str, Any]] = []
+    dense: list[qa.DenseHit] = []
     try:
         if args.qa_recall_only:
             modes = ()
-            for q in questions:
-                a = qa.probe(q, recall, llm.count_tokens)
-                answers.append(a)
-                log(
-                    f"qa recall {q.id}: gold {len(a.files_hit)}/{len(a.expected_files)}, facts "
-                    f"{a.context_facts}/{a.facts_total}, {a.recall_seconds * 1000:.0f} ms"
-                )
+            answers, hits = probe_embedder(questions, recall, model, llm.count_tokens)
+            dense += hits
+            embedders.append(qa.embedder_row(model, stats, answers, hits))
         for mode, context_for in modes:
             for q in questions:
                 a = await qa.ask(
@@ -356,6 +356,41 @@ async def cmd_qa(args: argparse.Namespace, out: Path, llm: LLM) -> dict[str, Any
         recall.close()
     del inner
     free_gpu()
+    others: list[qa.Answer] = []
+    if args.qa_recall_only:
+        # The same units and summaries, vectors from each further --embed-model.
+        for other in args.embed_model[1:]:
+            log(f"qa: adding vectors from {other} (not timed)")
+            inner = make_embedder(other, args)
+            st = qa.ingest_codebase(
+                args.database_url,
+                root,
+                repo,
+                qa.QueryEmbedder(inner, query=False),
+                summarizer,
+                fresh=False,
+            )
+            if args.qa_query_instruction != "none" and hasattr(inner, "query_instruction"):
+                inner.query_instruction = args.qa_query_instruction
+            rec = qa.StoreRecall(
+                args.database_url,
+                repo,
+                qa.QueryEmbedder(inner, query=True),
+                args.qa_budget,
+                args.qa_k,
+                reranker=reranker,
+            )
+            try:
+                ans, hits = probe_embedder(questions, rec, other, llm.count_tokens)
+            finally:
+                rec.close()
+            others += ans
+            dense += hits
+            embedders.append(qa.embedder_row(other, st, ans, hits))
+            del inner
+            free_gpu()
+    elif len(args.embed_model) > 1:
+        log("qa: answers use the first --embed-model; add --qa-recall-only to compare embedders")
 
     if not args.fake and not args.no_judge and not args.qa_recall_only:
         by_id = {q.id: q for q in questions}
@@ -364,8 +399,12 @@ async def cmd_qa(args: argparse.Namespace, out: Path, llm: LLM) -> dict[str, Any
             a.judge = v
 
     with (out / "qa-answers.jsonl").open("w") as f:
-        for a in answers:
+        for a in answers + others:
             f.write(json.dumps(qa.answer_to_json(a)) + "\n")
+    if dense:
+        with (out / "qa-dense.jsonl").open("w") as f:
+            for h in dense:
+                f.write(json.dumps(dataclasses.asdict(h)) + "\n")
     return {
         "codebase": root.name,
         "files": len(files),
@@ -381,7 +420,29 @@ async def cmd_qa(args: argparse.Namespace, out: Path, llm: LLM) -> dict[str, Any
         "ingest": dataclasses.asdict(stats),
         "summary": {m: qa.summarize(answers, m) for m in qa.MODES},
         "answers": [qa.answer_to_json(a) for a in answers],
+        "embedders": embedders,
     }
+
+
+def probe_embedder(
+    questions: list[qa.Question],
+    recall: qa.StoreRecall,
+    model: str,
+    count_tokens: Callable[[str], int],
+) -> tuple[list[qa.Answer], list[qa.DenseHit]]:
+    """Recall-only probes for one embedder, plus its dense-only ranking per question."""
+    answers, hits = [], []
+    for q in questions:
+        a = qa.probe(q, recall, count_tokens)
+        a.embedder = model
+        answers.append(a)
+        ranked, secs = recall.dense(q.question)
+        hits.append(qa.DenseHit(q.id, model, list(q.files), ranked, secs))
+        log(
+            f"qa recall {q.id} [{model}]: gold {len(a.files_hit)}/{len(a.expected_files)}, "
+            f"facts {a.context_facts}/{a.facts_total}, {a.recall_seconds * 1000:.0f} ms"
+        )
+    return answers, hits
 
 
 def render(meta: dict[str, Any], res: dict[str, Any]) -> str:
@@ -448,6 +509,7 @@ def render(meta: dict[str, Any], res: dict[str, Any]) -> str:
     if res.get("qa"):
         render = qa.render_probe_section if res["qa"].get("recall_only") else qa.render_section
         lines += render(res["qa"])
+        lines += qa.render_embedder_section(res["qa"].get("embedders") or [])
     return "\n".join(lines)
 
 
@@ -465,7 +527,12 @@ def parser() -> argparse.ArgumentParser:
     g.add_argument("--tokenizer", default=None, help="HF tokenizer for counting, default model")
     g.add_argument("--allow-thinking", action="store_true")
     g.add_argument("--concurrency", type=int, default=256)
-    g.add_argument("--embed-model", action="append", default=None, help="repeat to compare")
+    g.add_argument(
+        "--embed-model",
+        action="append",
+        default=None,
+        help="repeat to compare (retrieval, and qa with --qa-recall-only; a local folder works)",
+    )
     g.add_argument("--embed-batch", type=int, default=64)
     g.add_argument("--trust-remote-code", action="store_true")
     g = ap.add_argument_group("retrieval (Q1)")

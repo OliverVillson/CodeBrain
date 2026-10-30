@@ -230,6 +230,8 @@ class Answer:
     """Required facts whose pattern already matches the context. A fact the context
     shows but the answer lacks is a reading miss; one the context lacks is a recall miss."""
     recall_timings: dict[str, float] = field(default_factory=dict)
+    embedder: str | None = None
+    """The embedding model recall used (CodeBrain only)."""
 
     @property
     def correct(self) -> bool:
@@ -460,9 +462,20 @@ class IngestStats:
 
 
 def ingest_codebase(
-    database_url: str, root: Path, repo: str, embedder: QueryEmbedder, summarizer: Any
+    database_url: str,
+    root: Path,
+    repo: str,
+    embedder: QueryEmbedder,
+    summarizer: Any,
+    *,
+    fresh: bool = True,
 ) -> IngestStats:
-    """Index ``root`` from scratch under ``repo``. Not part of any timed measurement."""
+    """Index ``root`` from scratch under ``repo``. Not part of any timed measurement.
+
+    ``fresh=False`` keeps what is stored and adds vectors for ``embedder`` only: units,
+    summaries and edges stay as they are, so a second embedder is compared on exactly
+    the same units and summaries as the first.
+    """
     from codebrain.ingest.pipeline import Ingestor
     from codebrain.ingest.store import PostgresStore
     from codebrain.models import VectorView
@@ -471,14 +484,15 @@ def ingest_codebase(
     migrate(database_url)
     t0 = time.perf_counter()
     with connection(database_url) as conn:
-        conn.execute("DELETE FROM units WHERE repo = %s", (repo,))
+        if fresh:
+            conn.execute("DELETE FROM units WHERE repo = %s", (repo,))
         ingestor = Ingestor(
             PostgresStore(conn),
             repo,
             summarizer=summarizer,
             embedders={VectorView.SUMMARY: embedder, VectorView.CODE: embedder},
         )
-        report = ingestor.ingest(root, force=True)
+        report = ingestor.ingest(root, force=fresh)
         row = conn.execute("SELECT count(*) FROM units WHERE repo = %s", (repo,)).fetchone()
     return IngestStats(
         seconds=time.perf_counter() - t0,
@@ -514,6 +528,7 @@ class StoreRecall:
         # Recall here never logs, so there is nothing to commit; autocommit keeps the
         # benchmark from holding one transaction open for the whole run.
         self.conn = connect(database_url, autocommit=True)
+        self.encoder = encoder
         self.broker = ContextBroker(
             self.conn, {VectorView.SUMMARY: encoder, VectorView.CODE: encoder}, reranker=reranker
         )
@@ -541,8 +556,120 @@ class StoreRecall:
             timings=result.timings,
         )
 
+    def dense(self, question: str, k: int = 20) -> tuple[dict[str, list[str]], float]:
+        """The embedder's own ranking: file paths of the top ``k`` units by cosine alone,
+        per dense view, before lexical, symbol and graph signals and packing. Also the
+        seconds it took to embed the question."""
+        import numpy as np
+
+        from codebrain.models import VectorView
+        from codebrain.retrieval import search
+
+        t0 = time.perf_counter()
+        vec = np.asarray(self.encoder.embed([question])[0], dtype=np.float32)
+        secs = time.perf_counter() - t0
+        out: dict[str, list[str]] = {}
+        for view in (VectorView.CODE, VectorView.SUMMARY):
+            ids = search.vector_hits(self.conn, view, self.encoder.model, vec, self.filters, k)
+            rows = self.conn.execute(
+                "SELECT id, path FROM units WHERE id = ANY(%s)", (ids,)
+            ).fetchall()
+            path_of = {r[0]: r[1] for r in rows}
+            out[str(view)] = [path_of.get(i) or "" for i in ids]
+        return out, secs
+
     def close(self) -> None:
         self.conn.close()
+
+
+@dataclass
+class DenseHit:
+    """One question's dense-only ranking for one embedder (see ``StoreRecall.dense``)."""
+
+    question_id: str
+    embedder: str
+    expected_files: list[str]
+    ranked: dict[str, list[str]]
+    """Per view, the path of each top unit in rank order (repeats when a file has
+    several units in the top)."""
+    embed_seconds: float
+
+    def hits_at(self, view: str, k: int) -> int:
+        top = set(self.ranked.get(view, [])[:k])
+        return sum(f in top for f in self.expected_files)
+
+    def first_gold_rank(self, view: str) -> int | None:
+        for i, path in enumerate(self.ranked.get(view, []), 1):
+            if path in self.expected_files:
+                return i
+        return None
+
+
+def summarize_dense(hits: Sequence[DenseHit]) -> dict[str, Any]:
+    gold = [h for h in hits if h.expected_files]
+    n = len(gold) or 1
+    out: dict[str, Any] = {
+        "questions": len(gold),
+        "gold_files": sum(len(h.expected_files) for h in gold),
+        "mean_embed_ms": 1000 * sum(h.embed_seconds for h in hits) / (len(hits) or 1),
+    }
+    for view in ("code", "summary"):
+        for k in (10, 20):
+            out[f"{view}_files@{k}"] = sum(h.hits_at(view, k) for h in gold)
+        out[f"{view}_all@20"] = sum(h.hits_at(view, 20) == len(h.expected_files) for h in gold)
+        ranks = [h.first_gold_rank(view) for h in gold]
+        out[f"{view}_mrr"] = sum(1 / r for r in ranks if r) / n
+    return out
+
+
+def embedder_row(
+    model: str, ingest: IngestStats, answers: Sequence[Answer], dense: Sequence[DenseHit]
+) -> dict[str, Any]:
+    """One line of the embedder comparison: recall-only outcome plus dense-only ranking."""
+    return {
+        "model": model,
+        "ingest": asdict(ingest),
+        "summary": summarize(answers, "codebrain"),
+        "dense": summarize_dense(dense),
+    }
+
+
+def render_embedder_section(rows: Sequence[dict[str, Any]]) -> list[str]:
+    """``--qa-recall-only`` with several ``--embed-model``: one row per embedder."""
+    if len(rows) < 2:
+        return []
+    lines = [
+        "## Codebase Q&A · embedders compared (recall only)",
+        "",
+        "Same units and summaries for every embedder; only the vectors differ. "
+        "*Recall* is the full pipeline (dense, lexical, symbol, graph, packing) at the run's "
+        "budget. *Dense* ranks units by cosine alone, so it isolates the embedder: gold "
+        "files among the files of the top 10 units, and MRR of the first gold file.",
+        "",
+        "| embedder | recall: gold files (full) | recall: all gold | facts in context "
+        "| dense code @10 | dense summary @10 | code MRR | summary MRR | query embed ms "
+        "| recall ms | ingest s |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for r in rows:
+        s, d = r["summary"], r["dense"]
+        g = d["gold_files"]
+        lines.append(
+            f"| `{r['model']}` | {s['gold_files_hit']}/{s['gold_files']} ({s['gold_files_full']}) "
+            f"| {s['gold_questions_all_hit']}/{s['questions']} "
+            f"| {s['context_facts']}/{s['facts_total']} "
+            f"| {d['code_files@10']}/{g} | {d['summary_files@10']}/{g} "
+            f"| {d['code_mrr']:.3f} | {d['summary_mrr']:.3f} | {d['mean_embed_ms']:.0f} "
+            f"| {s['recall_seconds'] / max(s['questions'], 1) * 1000:.0f} "
+            f"| {r['ingest']['seconds']:.0f} |"
+        )
+    lines += [
+        "",
+        "Ingest time for the first embedder includes chunking and summaries; the others "
+        "only embed. Per-question rankings are in `qa-dense.jsonl`.",
+        "",
+    ]
+    return lines
 
 
 def render_section(r: dict[str, Any]) -> list[str]:

@@ -12,3 +12,5 @@ eval-results/
 .venv-eval/
 vllm.log
 vllm.pid
+embedder-data/
+models/
