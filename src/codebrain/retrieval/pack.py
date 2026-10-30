@@ -279,13 +279,21 @@ def _lines(unit: Unit) -> str:
     return f"{s}" if s == e else f"{s}-{e}"
 
 
-def render_grouped(blocks: Sequence[tuple[Unit, Resolution]]) -> str:
+def render_grouped(
+    blocks: Sequence[tuple[Unit, Resolution]], constants: Sequence[tuple[str, str]] = ()
+) -> str:
     """The packed units as one context block, grouped by file.
 
     Files come in the order of their best-ranked unit (``blocks`` is in rank order) and
     each file's units in line order under one ``### path`` heading. Signatures are one
     line each. Units without a path (episodes, decisions) keep their own block.
+    ``constants`` are ``(path, definition)`` pairs, shown under their file's heading
+    after its units, or under a heading of their own at the end.
     """
+    defs: dict[str, list[str]] = {}
+    for path, text in constants:
+        defs.setdefault(path, []).append(text)
+
     first: dict[str, int] = {}
     for i, (u, _) in enumerate(blocks):
         first.setdefault(u.path or u.id, i)
@@ -309,5 +317,12 @@ def render_grouped(blocks: Sequence[tuple[Unit, Resolution]]) -> str:
                 continue
             tag = " · summary" if r is Resolution.SUMMARY else ""
             parts.append(f"#### {_lines(u)}{name}{tag}{_stale(u)}\n{body(u, r)}")
+        if unit0.path in defs:
+            parts.append(_constants_block(defs.pop(unit0.path)))
         out.append("\n".join(parts))
+    out.extend(f"### {path}\n{_constants_block(texts)}" for path, texts in defs.items())
     return "\n\n".join(out)
+
+
+def _constants_block(texts: Sequence[str]) -> str:
+    return "#### constants used above\n" + "\n".join(texts)

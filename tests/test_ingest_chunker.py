@@ -186,6 +186,56 @@ def test_module_body_holds_loose_statements() -> None:
     assert names == ["b.py", "f"]
 
 
+def test_defaults_module_gets_a_unit_per_constant() -> None:
+    src = textwrap.dedent(
+        """\
+        import os
+
+        PREFIX = os.environ.get("PREFIX", "rq")
+        \"\"\"Prefix of every Redis key.\"\"\"
+
+        # Seconds a callback may run.
+        # Override per job with ``on_success=Callback(f, timeout=...)``.
+        CALLBACK_TIMEOUT = 60
+
+        RETRY_DELAYS = (
+            1,
+            5,
+        )
+        \"\"\"Waits between tries.
+        One per retry.
+        \"\"\"
+        if not PREFIX:
+            raise ValueError("empty prefix")
+        lowercase_setting = 3
+        """
+    )
+    pf = Chunker(tau_min=5, tau_max=1200).chunk_code("d.py", src.encode(), PYTHON)
+    units = by_name(pf)
+    assert [c.qualified_name for c in pf.chunks] == [
+        "d.py",
+        "d.py#PREFIX",
+        "d.py#CALLBACK_TIMEOUT",
+        "d.py#RETRY_DELAYS",
+    ]
+    timeout = units["d.py#CALLBACK_TIMEOUT"]
+    assert timeout.text.startswith("# Seconds a callback may run.") and timeout.parent == "d.py"
+    assert timeout.signature == "CALLBACK_TIMEOUT = 60" and timeout.labels == {"constant": True}
+    assert (timeout.start_line, timeout.end_line) == (6, 8)
+    assert units["d.py#PREFIX"].text.endswith('"""Prefix of every Redis key."""')
+    assert units["d.py#RETRY_DELAYS"].text.endswith('One per retry.\n"""')
+
+    # Two constants, or a module with definitions: no per-constant units.
+    two = "A_B = 1\nC_D = 2\n" + "x = 1\n" * 30
+    names = [
+        c.qualified_name for c in Chunker(tau_min=5).chunk_code("t.py", two.encode(), PYTHON).chunks
+    ]
+    assert names == ["t.py"]
+    with_def = src + "\n\ndef f():\n    return CALLBACK_TIMEOUT\n"
+    pf = Chunker(tau_min=5, tau_max=1200).chunk_code("w.py", with_def.encode(), PYTHON)
+    assert not any(c.labels.get("constant") for c in pf.chunks)
+
+
 def test_duplicate_names_get_suffix() -> None:
     src = (
         "class A:\n"

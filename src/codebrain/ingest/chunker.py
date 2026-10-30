@@ -17,6 +17,10 @@ Size rules, with t(u) the token count:
 * A module with definitions also gets a ``path#body`` unit holding its top-level
   statements other than imports and definitions: constants, settings, registries.
   Showing one constant otherwise meant showing the whole module (or its skeleton).
+* A module without definitions but with several UPPER_CASE constants (a defaults or
+  settings file) gets a ``path#NAME`` unit per constant, with its comment or
+  docstring. As one long unit it ranked low for any single setting and was packed
+  as a summary, which holds none of the values.
 
 ``ast_hash`` hashes node types and leaf tokens with comments dropped, so
 whitespace and comment edits do not count as changes.
@@ -108,6 +112,15 @@ def ast_hash(nodes: Iterable[Node], comments: frozenset[str]) -> str:
 
 
 _COMMENT_STARTS = ("#", "//", "/*", "*")
+CONSTANTS_MIN = 3
+"""A module without definitions gets per-constant units only if it has this many."""
+SIGNATURE_MAX_CHARS = 160
+_CONSTANT = re.compile(
+    r"^(?:export\s+)?(?:(?:pub(?:\([^)]*\))?|const|static|final|let|var)\s+)*"
+    r"([A-Za-z_]\w*)\s*(?::[^=\n]*)?=(?!=)"
+)
+"""A top-level ``NAME = value`` (``const NAME = ...``, ``pub static NAME: T = ...``)."""
+
 BODY_MIN_TOKENS = 12
 """A module body smaller than this (``__all__ = [...]`` alone) is not worth a unit."""
 _CLOSING = {"}", "};", "})", "end", ")"}
@@ -150,10 +163,11 @@ class Chunker:
             if c.depth == 1:
                 c.parent = module.qualified_name
         body = self._module_body(f, loose) if children else None
+        consts = [] if children else self._module_constants(f, loose, module)
         return ParsedFile(
             path=path,
             language=spec.name,
-            chunks=[module, *([body] if body else []), *children],
+            chunks=[module, *([body] if body else []), *consts, *children],
             imports=list(spec.imports(root)),
             has_errors=root.has_error,
             is_test=spec.is_test_path(path),
@@ -226,6 +240,53 @@ class Chunker:
                 seen.add(id(run))
                 keep.append(run)
         return keep
+
+    def _module_constants(self, f: _FileCtx, loose: list[Node], module: Chunk) -> list[Chunk]:
+        """``path#NAME`` units for the constants of a module without definitions: each
+        top-level ``NAME = ...`` with the comments right above it and the docstring right
+        below it. None when there are fewer than ``CONSTANTS_MIN`` or the module is small
+        enough to show whole."""
+        if module.tokens <= self.tau_min:
+            return []
+        out: list[Chunk] = []
+        for i, n in enumerate(loose):
+            if not _substantive(n):
+                continue
+            s, e = _lines(n)
+            m = _CONSTANT.match(f.lines[s - 1])
+            if m is None or not _upper(m.group(1)):
+                continue
+            nodes = [n]
+            nxt = loose[i + 1] if i + 1 < len(loose) else None
+            if nxt is not None and _lines(nxt)[0] == e + 1 and _docstring(nxt):
+                nodes.append(nxt)
+                e = _lines(nxt)[1]
+            j = i
+            while (
+                j > 0 and loose[j - 1].type in f.spec.comments and _lines(loose[j - 1])[1] == s - 1
+            ):
+                j -= 1
+                s = _lines(loose[j])[0]
+            text = f.slice(s, e)
+            tokens = self.count(text)
+            if tokens > self.tau_max:
+                continue
+            out.append(
+                Chunk(
+                    kind=UnitKind.MODULE,
+                    qualified_name=f.unique(f"{f.path}#{m.group(1)}"),
+                    start_line=s,
+                    end_line=e,
+                    text=text,
+                    tokens=tokens,
+                    ast_hash=ast_hash(nodes, f.spec.comments),
+                    depth=1,
+                    parent=f.path,
+                    signature=f.lines[_lines(n)[0] - 1].strip()[:SIGNATURE_MAX_CHARS],
+                    labels={"constant": True},
+                )
+            )
+        return out if len(out) >= CONSTANTS_MIN else []
 
     def _module_body(self, f: _FileCtx, loose: list[Node]) -> Chunk | None:
         """The ``path#body`` unit: a module's loose statements without imports or anything
@@ -596,6 +657,18 @@ def _lines(node: Node) -> tuple[int, int]:
     if node.end_point[1] == 0 and end > start:  # ends at the start of the next line
         end -= 1
     return start, end
+
+
+def _docstring(node: Node) -> bool:
+    """A bare string statement (the grammar may or may not wrap it)."""
+    named = node.named_children
+    return node.type == "string" or (
+        node.type == "expression_statement" and len(named) == 1 and named[0].type == "string"
+    )
+
+
+def _upper(name: str) -> bool:
+    return name.isupper() and len(name.strip("_")) >= 2
 
 
 def _substantive(node: Node) -> bool:

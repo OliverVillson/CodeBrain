@@ -32,7 +32,8 @@ from pydantic import BaseModel
 
 from codebrain.config import Settings, get_settings
 from codebrain.models import Resolution, Retrieval, Unit, VectorView
-from codebrain.retrieval import fusion, graph, pack, search
+from codebrain.retrieval import constants, fusion, graph, pack, search
+from codebrain.retrieval.constants import Constant
 from codebrain.retrieval.encoders import Encoders, Vector, encode_query
 from codebrain.retrieval.mmr import Pick, mmr
 from codebrain.retrieval.scoring import ScoreBreakdown, path_match, score
@@ -88,10 +89,15 @@ class RecallResult(BaseModel):
     units: list[RecalledUnit]
     timings: dict[str, float] = {}
     """Seconds spent in each recall stage."""
+    constants: list[Constant] = []
+    """Definitions of UPPER_CASE names the packed code uses but does not define."""
 
     def render(self) -> str:
         """The context block to hand the agent, grouped by file."""
-        return pack.render_grouped([(u.unit, u.resolution) for u in self.units])
+        return pack.render_grouped(
+            [(u.unit, u.resolution) for u in self.units],
+            [(c.path, c.text) for c in self.constants],
+        )
 
 
 class Explanation(BaseModel):
@@ -178,9 +184,11 @@ class ContextBroker:
         bumped (the usage-credit denominator, sketch §8).
         """
         filters = filters or Filters()
+        rp = self.settings.retrieval
         ranking = self._rank(query, filters)
+        reserve = int(budget * rp.constants_share) if rp.max_constants > 0 else 0
         with ranking.timer("pack"):
-            packed, order = self._pack(ranking, budget, k)
+            packed, order = self._pack(ranking, budget - reserve, k)
 
         units: list[RecalledUnit] = []
         for uid in order:
@@ -201,12 +209,16 @@ class ContextBroker:
                     text=pack.render(unit, opt.resolution),
                 )
             )
+        used = sum(u.tokens for u in units)
+        with ranking.timer("constants"):
+            consts = self._constants(units, budget - used)
         result = RecallResult(
             query=query,
             budget=budget,
-            tokens_used=sum(u.tokens for u in units),
+            tokens_used=used + sum(c.tokens for c in consts),
             units=units,
             timings=ranking.timer.seconds,
+            constants=consts,
         )
         if log and units:
             repo.log_retrievals(
@@ -454,6 +466,29 @@ class ContextBroker:
         return 0.0
 
     # Stage 4.
+
+    def _constants(self, units: Sequence[RecalledUnit], room: int) -> list[Constant]:
+        """Definitions of the constants ``units`` use, in rank order, while they fit."""
+        cap = self.settings.retrieval.max_constants
+        shown = [u for u in units if u.resolution is not Resolution.SUMMARY and u.unit.path]
+        texts = [u.text for u in shown]
+        names = constants.referenced(texts)
+        if cap <= 0 or room <= 0 or not names:
+            return []
+        found = constants.lookup(
+            self.conn,
+            names,
+            users=[u.unit.path for u in shown if u.unit.path],
+            repos=sorted({u.unit.repo for u in shown if u.unit.repo}),
+        )
+        out: list[Constant] = []
+        for c in found:
+            if len(out) >= cap:
+                break
+            if c.tokens <= room:
+                out.append(c)
+                room -= c.tokens
+        return out
 
     def _pack(
         self, ranking: _Ranking, budget: int, k: int | None

@@ -449,3 +449,66 @@ def test_reranker_boosts_its_picks(conn: psycopg.Connection, corpus: dict[str, U
     result = broker.recall(QUERY, 10_000, log=False)
     assert len(seen) == 1 and len(seen[0]) == 3
     assert result.units[0].unit.id == seen[0][-1] != "bucket"
+
+
+def test_constant_values_follow_the_code_that_uses_them() -> None:
+    from codebrain.retrieval import constants
+
+    code = "def run(self):\n    t = self.timeout or CALLBACK_TIMEOUT\n    LOCAL_LIMIT = 3\n"
+    assert constants.referenced([code, "x = LOCAL_LIMIT + MAX_JOBS"]) == [
+        "CALLBACK_TIMEOUT",
+        "MAX_JOBS",
+    ]
+    defaults = (
+        'import os\n\n# Seconds.\nCALLBACK_TIMEOUT = 60\n"""Callback limit."""\n'
+        "DELAYS = (\n    1,\n    5,\n)\nclass Q:\n    MAX_JOBS: int = 10  # per queue\n"
+    )
+    assert constants.statement(defaults, "CALLBACK_TIMEOUT") == (
+        '# Seconds.\nCALLBACK_TIMEOUT = 60\n"""Callback limit."""'
+    )
+    assert constants.statement(defaults, "DELAYS") == "DELAYS = (\n    1,\n    5,\n)"
+    assert constants.statement(defaults, "MAX_JOBS") == "MAX_JOBS: int = 10  # per queue"
+    assert constants.statement("if CALLBACK_TIMEOUT == 3: pass", "CALLBACK_TIMEOUT") is None
+
+
+@pytest.mark.db
+def test_recall_adds_the_values_of_constants_the_code_uses(conn: psycopg.Connection) -> None:
+    lines = "".join(f"    step_{i} = run(step_{i - 1})\n" for i in range(1, 20))
+    use = _code(
+        "cb",
+        "q/callbacks.py",
+        "Callback.__init__",
+        "Callback timeout.",
+        "callback timeout",
+        text=f"def __init__(self, timeout=None):\n{lines}    t = timeout or CALLBACK_TIMEOUT\n",
+    )
+    _store(conn, use)
+    for uid, path in (("near", "q/defaults.py"), ("far", "other/lib/defaults.py")):
+        _store(
+            conn,
+            _code(
+                uid,
+                path,
+                path,
+                "Defaults.",
+                "zzz",
+                kind=UnitKind.MODULE,
+                text=f"# Seconds.\nCALLBACK_TIMEOUT = {60 if uid == 'near' else 5}\nOTHER_X = 1\n",
+            ),
+            vectors=False,
+        )
+    filters = Filters(path_prefix="q/callbacks")
+    res = _broker(conn).recall("callback timeout", 2000, filters=filters, log=False)
+    assert [u.unit.id for u in res.units] == ["cb"]
+    # The definition nearest to the code that uses it, and only the names it uses.
+    assert [(c.name, c.path) for c in res.constants] == [("CALLBACK_TIMEOUT", "q/defaults.py")]
+    text = res.render()
+    assert "### q/defaults.py\n#### constants used above\n# Seconds.\nCALLBACK_TIMEOUT = 60" in text
+    assert res.tokens_used == res.units[0].tokens + res.constants[0].tokens <= 2000
+
+    # Off, or no room left: nothing added.
+    settings = _settings()
+    settings.retrieval.max_constants = 0
+    assert _broker(conn, settings).recall("callback timeout", 2000, filters=filters).constants == []
+    tight = _broker(conn).recall("callback timeout", res.units[0].tokens, filters=filters)
+    assert tight.constants == []

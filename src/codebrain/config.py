@@ -131,6 +131,12 @@ class RetrievalParams(BaseModel):
     cost most answers on the codebase Q&A benchmark. 0 turns it off."""
     full_share: float = 0.75
     """Share of the budget the full-code picks may use; the rest buys breadth."""
+    constants_share: float = 0.03
+    """Share of the budget kept back for the values of UPPER_CASE constants that packed
+    code uses but does not define (``CALLBACK_TIMEOUT = 60`` from a defaults module).
+    They also get whatever the packing left unused."""
+    max_constants: int = 20
+    """At most this many constant definitions per recall; 0 turns the lookup off."""
     toc_share: float = 0.08
     """Share of the budget kept back for one-line signatures of the picks that did not
     fit otherwise, so the model knows which names exist."""
