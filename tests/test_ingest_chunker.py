@@ -279,3 +279,52 @@ def test_approx_tokens() -> None:
     assert approx_tokens("") == 0
     assert approx_tokens("a + b") == 3
     assert approx_tokens("x" * 17) == 3
+
+
+def test_skeleton_keeps_decorated_class_headers() -> None:
+    classes = "\n\n".join(
+        f"@dataclass\nclass Model{i}:\n    a: int = {i}\n    b: str = 'x'\n    c: float = 0.5\n"
+        for i in range(60)
+    )
+    src = f'"""Models."""\nfrom dataclasses import dataclass\n\n{classes}'
+    pf = Chunker(tau_min=5, tau_max=600).chunk_code("models.py", src.encode(), PYTHON)
+    module = pf.chunks[0]
+    assert module.labels.get("skeleton")
+    assert "@dataclass\nclass Model0:\n    ..." in module.text
+    assert "class Model5:" in module.text and "a: int = 5" not in module.text
+
+
+def test_split_parts_keep_lines_between_statements() -> None:
+    stmts = "\n\n".join(
+        f"    total = total + compute_value_{i}(alpha, beta, gamma)" for i in range(60)
+    )
+    src = f"def big(alpha, beta, gamma):\n    total = 0\n{stmts}\n    return total\n"
+    pf = Chunker(tau_min=10, tau_max=150).chunk_code("big.py", src.encode(), PYTHON)
+    parts = [x for x in pf.chunks if "#part" in x.qualified_name]
+    for a, b in zip(parts, parts[1:], strict=False):
+        assert b.start_line == a.end_line + 1
+
+
+def test_arrow_function_signature_keeps_its_name() -> None:
+    src = "export const parseLimit = (raw: string): number => {\n  return Number(raw);\n};\n"
+    pf = Chunker(tau_min=1).chunk_code("a.ts", src.encode(), TYPESCRIPT)
+    assert by_name(pf)["parseLimit"].signature == "const parseLimit = (raw: string): number"
+
+
+def test_go_grouped_types_are_one_unit_each() -> None:
+    src = "package m\n\ntype (\n\tA struct{ x int }\n\tB int\n)\n"
+    c = by_name(Chunker(tau_min=1).chunk_code("m.go", src.encode(), GO))
+    assert {"A", "B"} <= set(c) and c["A"].kind is UnitKind.CLASS
+    assert (c["A"].start_line, c["B"].start_line) == (4, 5)
+
+
+def test_nested_class_scope_is_fully_qualified() -> None:
+    src = "class Outer:\n    class Inner:\n        def m(self):\n            return 1\n"
+    c = by_name(Chunker(tau_min=1).chunk_code("a.py", src.encode(), PYTHON))
+    assert c["Outer.Inner.m"].scope == "Outer.Inner"
+
+
+def test_test_path_globs() -> None:
+    assert PYTHON.is_test_path("pkg/conftest.py")
+    assert JAVA.is_test_path("service/src/test/java/a/FooIT.java")
+    assert not JAVA.is_test_path("service/src/main/java/a/Foo.java")

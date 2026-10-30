@@ -50,11 +50,15 @@ class Chunk:
     """Qualified name of the parent chunk in the same file."""
     signature: str | None = None
     scope: str | None = None
-    """Enclosing type name, used to resolve ``self.x()`` calls."""
+    """Qualified name of the enclosing type (``Outer.Inner``), used to resolve ``self.x()``."""
     receiver: str | None = None
     """Extra name that means ``self`` in this unit (Go receivers)."""
     nodes: list[Node] = field(default_factory=list, repr=False)
     """Syntax whose calls belong to this unit."""
+    exclude: list[tuple[int, int]] = field(default_factory=list, repr=False)
+    """Byte ranges inside ``nodes`` whose calls belong to other units."""
+    header_end: int | None = None
+    """Last line of the declaration, before the body (decorators and all)."""
     aliases: list[str] = field(default_factory=list)
     """Other qualified names that resolve to this chunk (members of a merged run)."""
     members: list[Chunk] = field(default_factory=list, repr=False)
@@ -121,7 +125,10 @@ class Chunker:
         root = tree.root_node
         f = _FileCtx(path, spec, source.decode("utf-8", "replace").split("\n"))
         children = self._container_children(f, root, prefix="", scope=None, in_class=False, depth=1)
-        loose = [n for n in root.named_children if spec.definition(n) is None]
+        loose = [n for n in root.named_children if not spec.definitions_at(n)]
+        # Definitions nested in ``if``/``try`` blocks are units of their own; their calls
+        # must not also count as the module's.
+        nested = [(d.outer.start_byte, d.outer.end_byte) for d in spec.definitions(root)]
         module = self._container(
             f,
             kind=UnitKind.MODULE,
@@ -133,6 +140,7 @@ class Chunker:
             signature=None,
             calls_from=loose,
         )
+        module.exclude = nested
         for c in children:
             if c.depth == 1:
                 c.parent = module.qualified_name
@@ -167,8 +175,8 @@ class Chunker:
                 kind = UnitKind.METHOD if (in_class or d.qualifier) else UnitKind.FUNCTION
                 chunks = self._function(f, d, kind, qn, scope or d.qualifier, depth)
             else:
-                child_scope = d.scope or d.name
-                child_prefix = (prefix + child_scope) + "."
+                child_scope = prefix + (d.scope or d.name)
+                child_prefix = child_scope + "."
                 inner = d.node.child_by_field_name("body") or d.node
                 kids = self._container_children(
                     f,
@@ -188,6 +196,7 @@ class Chunker:
                     depth=depth,
                     signature=_signature(d),
                     calls_from=[],
+                    header_end=_body_header_end(d),
                 )
                 head.scope = child_scope
                 for k in kids:
@@ -232,6 +241,7 @@ class Chunker:
             scope=scope,
             nodes=[d.node],
             receiver=d.receiver,
+            header_end=_body_header_end(d),
         )
         if tokens <= self.tau_max:
             return [base]
@@ -245,6 +255,8 @@ class Chunker:
             header_end = start
             spans = [(start + 1, end)] if end > start else [(start, end)]
         groups = self._group_spans(f, spans)
+        # The last part runs to the end of the function (a closing brace, trailing comments).
+        groups[-1] = (groups[-1][0], max(groups[-1][1], end))
         parts: list[Chunk] = []
         for i, (s, e) in enumerate(groups, 1):
             ptext = f.slice(s, e)
@@ -296,7 +308,12 @@ class Chunker:
                 cur, cur_tokens = (s, e), t
         if cur:
             groups.append(cur)
-        return groups
+        # Comments and blank lines between groups go with the group before them, so every
+        # line from the first span to the last is in some group.
+        return [
+            (s, max(e, groups[i + 1][0] - 1)) if i + 1 < len(groups) else (s, e)
+            for i, (s, e) in enumerate(groups)
+        ]
 
     def _line_windows(self, f: _FileCtx, s: int, e: int) -> list[tuple[int, int]]:
         out: list[tuple[int, int]] = []
@@ -322,6 +339,7 @@ class Chunker:
         depth: int,
         signature: str | None,
         calls_from: list[Node],
+        header_end: int | None = None,
     ) -> Chunk:
         start, end = _lines(outer)
         end = max(start, min(end, len(f.lines)))
@@ -348,6 +366,7 @@ class Chunker:
             depth=depth,
             signature=signature,
             nodes=calls_from,
+            header_end=header_end,
             labels=labels,
         )
 
@@ -534,20 +553,30 @@ def _indent(line: str) -> str:
 def _signature(d: Definition) -> str:
     """Declaration text up to the body, on one line."""
     node = d.node
+    start = node
+    # ``const f = (a) => ...``: the unit is the arrow function, but its name is outside it.
+    if node.parent is not None and node.parent.type == "variable_declarator":
+        start = node.parent.parent or node.parent
     body = node.child_by_field_name("body")
-    raw = node.text or b""
-    raw = raw[: body.start_byte - node.start_byte] if body is not None else raw.split(b"\n", 1)[0]
+    raw = start.text or b""
+    raw = raw[: body.start_byte - start.start_byte] if body is not None else raw.split(b"\n", 1)[0]
     return " ".join(raw.decode("utf-8", "replace").split()).rstrip(" {:=>")
+
+
+def _body_header_end(d: Definition) -> int:
+    """Last line of a definition's declaration: the line before its first body statement."""
+    decl = d.node.start_point[0] + 1
+    body = d.node.child_by_field_name("body")
+    if body is None:
+        return decl
+    first = body.named_children[0] if body.named_children else body
+    return max(decl, first.start_point[0])  # 0-based start row == 1-based line before it
 
 
 def _header_end(c: Chunk) -> int:
     """Last line of a chunk's declaration, before its body."""
-    for n in c.nodes:
-        body = n.child_by_field_name("body")
-        if body is not None:
-            first = body.named_children[0] if body.named_children else body
-            line = first.start_point[0] + 1
-            return max(c.start_line, line - 1)
+    if c.header_end is not None:
+        return max(c.start_line, c.header_end)
     return c.start_line
 
 

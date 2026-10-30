@@ -126,7 +126,7 @@ def checkout(spec: str, cache: Path) -> tuple[str, Path]:
     if not dest.exists():
         log.info("cloning %s", spec)
         dest.parent.mkdir(parents=True, exist_ok=True)
-        tmp = dest.with_suffix(".tmp")
+        tmp = dest.parent / (dest.name + ".tmp")  # with_suffix would eat part of "v1.2"
         subprocess.run(["rm", "-rf", str(tmp)], check=True)
         subprocess.run(["git", "clone", "--quiet", "--filter=blob:none", url, str(tmp)], check=True)
         if ref:
@@ -381,7 +381,9 @@ class StoreRecall:
         from codebrain.retrieval.search import Filters
         from codebrain.store import connect
 
-        self.conn = connect(database_url)
+        # Recall here never logs, so there is nothing to commit; autocommit keeps the
+        # benchmark from holding one transaction open for the whole run.
+        self.conn = connect(database_url, autocommit=True)
         self.broker = ContextBroker(
             self.conn, {VectorView.SUMMARY: encoder, VectorView.CODE: encoder}
         )

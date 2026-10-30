@@ -132,7 +132,7 @@ class GraphBuilder:
         for c in pf.chunks:
             src = self._id(pf.path, c.qualified_name)
             for node in c.nodes:
-                for ref in spec.call_refs(node):
+                for ref in spec.call_refs(node, c.exclude):
                     sym = self._resolve(ref, c, pf, spec, bindings)
                     if sym is None:
                         continue
@@ -150,7 +150,8 @@ class GraphBuilder:
         name, recv = ref.name, ref.receiver
         here = pf.path
         is_self = recv is not None and (recv in spec.self_names or recv == chunk.receiver)
-        if (recv is None or is_self) and chunk.scope:
+        # A bare ``x()`` only means a member of the enclosing type where the language says so.
+        if (is_self or (recv is None and spec.implicit_self)) and chunk.scope:
             sym = self.table.lookup(here, f"{chunk.scope}.{name}")
             if sym is not None:
                 return sym
@@ -231,13 +232,16 @@ class GraphBuilder:
         elif lang == "go":
             # Import paths carry the module prefix (example.com/app/...), which is not part
             # of repo paths: match the longest trailing run of segments that names a dir.
+            # A lone last segment (``example.com/app/util`` -> ``util``) is tried only for
+            # module paths; standard library paths (``net/http``) have no dot up front.
             segs = imp.module.strip("/").split("/")
+            min_run = 1 if "." in segs[0] else 2
             dirs: dict[str, list[str]] = defaultdict(list)
             for p in paths:
                 if p.endswith(".go") and not p.endswith("_test.go"):
                     dirs[posixpath.dirname(p)].append(p)
             for k in range(len(segs)):
-                if k > 0 and len(segs) - k < 2:
+                if k > 0 and len(segs) - k < min_run:
                     break
                 suffix = "/".join(segs[k:])
                 hits = [d for d in dirs if d == suffix or d.endswith("/" + suffix)]
@@ -266,9 +270,12 @@ class GraphBuilder:
             for _ in range(level - 1):
                 base = posixpath.dirname(base)
             stem = posixpath.join(base, rel) if rel else base
-            for cand in (f"{stem}.py", f"{stem}/__init__.py", f"{stem}.pyi"):
-                if posixpath.normpath(cand) in paths:
-                    yield posixpath.normpath(cand)
+            # join, not f-strings: with a root-level importer ``stem`` is "" and the package
+            # file is "__init__.py", not "/__init__.py".
+            cands = [stem + ".py", posixpath.join(stem, "__init__.py"), stem + ".pyi"]
+            for cand in (posixpath.normpath(c) for c in cands if c not in (".py", ".pyi")):
+                if cand in paths:
+                    yield cand
                     return
             return
         hit = _unique_suffix(paths, [f"{rel}.py", f"{rel}/__init__.py", f"{rel}.pyi"])

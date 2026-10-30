@@ -278,11 +278,20 @@ class ContextBroker:
             query_vecs=qvecs,
             tsq=tsq,
         )
-        rows = self._load(ranking, [*fused, *neighbours], filters)
-        # Expansion is capped after filtering so filtered-out neighbours don't use slots.
-        kept = [u for u in neighbours if u in rows][: gp.expand_keep]
-        for u in set(neighbours).difference(kept):
-            rows.pop(u, None)
+        rows = self._load(ranking, list(fused), filters)
+        # Expansion is capped after filtering so filtered-out neighbours don't use slots,
+        # but only a bounded prefix of the (often repo-sized) neighbourhood is loaded.
+        kept: list[str] = []
+        batch = max(1, gp.expand_load_factor * gp.expand_keep)
+        start = 0
+        while len(kept) < gp.expand_keep and start < len(neighbours):
+            chunk = neighbours[start : start + batch]
+            start += batch
+            loaded = self._load(ranking, chunk, filters)
+            for u in chunk:
+                if u in loaded and len(kept) < gp.expand_keep:
+                    kept.append(u)
+                    rows[u] = loaded[u]
         ranking.rows = rows
         ranking.expanded = set(kept)
         ranking.lexical_max = max((r.lexical for r in rows.values()), default=0.0)

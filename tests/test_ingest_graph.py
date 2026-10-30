@@ -134,3 +134,92 @@ def test_symbol_table_remove_path() -> None:
     table.remove_path("a.py")
     assert not table.by_short["f"] and "a.py" not in table.paths and "a.py" not in table.modules
     assert EdgeType.CALLS.default_weight == 1.0
+
+
+def test_go_single_segment_package_import() -> None:
+    edges = build(
+        {
+            "util/do.go": "package util\nfunc Do() int { return 1 }\n",
+            "main.go": (
+                'package main\nimport "github.com/me/repo/util"\nfunc main() { util.Do() }\n'
+            ),
+            "internal/http/h.go": "package http\nfunc Get() {}\n",
+            "srv.go": 'package main\nimport "net/http"\nfunc serve() { http.Get() }\n',
+        }
+    )
+    assert ("main.go:main.go", "util/do.go:util/do.go", "imports") in edges
+    assert ("main.go:main", "util/do.go:Do", "calls") in edges
+    # Standard library paths do not match a repo dir by their last segment alone.
+    assert not any(e[0].startswith("srv.go") and e[1].startswith("internal/") for e in edges)
+
+
+def test_relative_import_from_root_module_resolves_package() -> None:
+    edges = build({"__init__.py": "X = 1\n", "main.py": "from . import X\n"})
+    assert ("main.py:main.py", "__init__.py:__init__.py", "imports") in edges
+
+
+def test_nested_class_self_calls_and_bare_calls() -> None:
+    edges = build(
+        {
+            "a.py": """\
+                def helper():
+                    return 1
+
+                class Outer:
+                    class Inner:
+                        def m(self):
+                            return self.n()
+
+                        def n(self):
+                            return 2
+
+                class Other:
+                    def n(self):
+                        return 3
+
+                    def run(self):
+                        return helper()
+
+                    def helper(self):
+                        return 4
+                """
+        }
+    )
+    # ``n`` is ambiguous repo-wide, so only the full scope finds the right one.
+    assert ("a.py:Outer.Inner.m", "a.py:Outer.Inner.n", "calls") in edges
+    # A bare call in Python is the module function, not the method of the same name.
+    assert ("a.py:Other.run", "a.py:helper", "calls") in edges
+    assert ("a.py:Other.run", "a.py:Other.helper", "calls") not in edges
+
+
+def test_java_bare_calls_mean_this() -> None:
+    edges = build(
+        {
+            "A.java": """\
+                class A {
+                    void run() { step(); }
+                    void step() {}
+                }
+                """
+        }
+    )
+    assert ("A.java:A.run", "A.java:A.step", "calls") in edges
+
+
+def test_calls_in_nested_definitions_belong_to_them_only() -> None:
+    edges = build(
+        {
+            "a.py": """\
+                def target():
+                    return 1
+
+                try:
+                    import fast
+                except ImportError:
+                    def fallback():
+                        return target()
+                """
+        }
+    )
+    assert ("a.py:fallback", "a.py:target", "calls") in edges
+    assert ("a.py:a.py", "a.py:target", "calls") not in edges

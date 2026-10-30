@@ -15,7 +15,7 @@ from codebrain.models import (
     VectorView,
     code_unit_id,
 )
-from codebrain.store import migrate, repo
+from codebrain.store import connect, migrate, repo
 from codebrain.store.migrate import discover
 
 
@@ -126,3 +126,13 @@ def test_schema_rejects_session_unit_without_session(conn: psycopg.Connection) -
         conn.execute(
             "INSERT INTO units (id, kind, namespace, text) VALUES ('x', 'turn', 'session', 't')"
         )
+
+
+@pytest.mark.db
+def test_connect_does_not_leave_a_transaction_open(database_url: str) -> None:
+    for autocommit in (False, True):
+        with connect(database_url, autocommit=autocommit) as c:
+            assert c.info.transaction_status is psycopg.pq.TransactionStatus.IDLE
+            assert c.autocommit is autocommit
+            # pgvector types are still registered.
+            assert c.execute("SELECT '[1,2]'::vector").fetchone() is not None

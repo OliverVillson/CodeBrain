@@ -12,7 +12,7 @@ from collections.abc import Callable, Iterable, Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING, Protocol
 
-from codebrain.models import Edge, Episode, Retrieval, Unit, UnitKind, UnitVector
+from codebrain.models import Edge, Episode, Namespace, Retrieval, Unit, UnitKind, UnitVector
 
 if TYPE_CHECKING:
     from codebrain.memory.diff import FileChange
@@ -48,9 +48,20 @@ class MemoryStore(Protocol):
     def insert_episode(self, episode: Episode) -> None: ...
 
     def nearest(
-        self, kind: UnitKind, model: str, embedding: Sequence[float], repo_name: str | None
+        self,
+        kind: UnitKind,
+        model: str,
+        embedding: Sequence[float],
+        repo_name: str | None,
+        *,
+        namespace: Namespace,
+        session_id: str | None = None,
     ) -> tuple[Unit, float] | None:
-        """The closest stored unit of ``kind`` by summary-vector cosine, for the duplicate check."""
+        """The closest live unit of ``kind`` by summary-vector cosine, for the duplicate check.
+
+        Only units a new record may be merged into count: same repo and namespace (and
+        session, for session units), not deprecated (validity > 0) and not tombstoned.
+        """
         ...
 
     def units_changed_by(self, repo: str, changes: Sequence[FileChange]) -> list[Unit]:

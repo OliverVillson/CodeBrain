@@ -20,6 +20,7 @@ from datetime import datetime
 from typing import Protocol
 
 import psycopg
+from psycopg.rows import dict_row
 
 from codebrain.ingest.graph import STRUCTURAL_EDGES, Symbol
 from codebrain.models import (
@@ -104,12 +105,13 @@ class PostgresStore:
         ]
 
     def units_at(self, repo: str, path: str) -> list[Unit]:
-        ids = self.conn.execute(
-            "SELECT id FROM units WHERE repo = %s AND path = %s AND namespace = 'code'",
-            (repo, path),
-        ).fetchall()
-        units = (db.get_unit(self.conn, r[0]) for r in ids)
-        return [u for u in units if u is not None]
+        with self.conn.cursor(row_factory=dict_row) as cur:
+            rows = cur.execute(
+                f"SELECT {db.UNIT_COLUMNS} FROM units "
+                "WHERE repo = %s AND path = %s AND namespace = 'code' ORDER BY start_line, id",
+                (repo, path),
+            ).fetchall()
+        return [db.row_to_unit(r) for r in rows]
 
     def upsert_unit(self, unit: Unit) -> None:
         db.upsert_unit(self.conn, unit)

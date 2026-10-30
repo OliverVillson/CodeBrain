@@ -13,6 +13,7 @@ from codebrain.ingest.summarize import (
     build_prompt,
     leading_doc,
     make_summarizer,
+    register_summarizer,
 )
 from codebrain.models import UnitKind
 
@@ -144,3 +145,37 @@ def test_make_embedder() -> None:
     assert make_embedder("fixed:16").model == "hashing-v1-16"
     with pytest.raises(ValueError):
         make_embedder("mystery:model")
+
+
+def test_leading_doc_must_be_the_first_statement() -> None:
+    assert leading_doc('x = 1\n\ndef g():\n    """Nested doc."""\n') is None
+    assert leading_doc('def f():\n    x = """literal"""\n') is None
+    sig = (
+        '@cache\ndef f(\n    a: int,\n    b: dict = {},\n) -> None:  # note\n    """Real doc."""\n'
+    )
+    assert leading_doc(sig) == "Real doc."
+    assert leading_doc('#!/usr/bin/env python\n"""Module doc."""\nimport os\n') == "Module doc."
+
+
+def test_registered_summarizers_get_options() -> None:
+    got: dict[str, object] = {}
+
+    def factory(arg: str, **options: object) -> HeuristicSummarizer:
+        got.update(arg=arg, **options)
+        return HeuristicSummarizer()
+
+    register_summarizer("custom", factory)
+    make_summarizer("custom:big", effort="high", max_tokens=99)
+    assert got == {"arg": "big", "effort": "high", "max_tokens": 99}
+
+
+def test_sentence_transformers_gets_batch_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    import codebrain.ingest.embed as embed
+
+    class Fake:
+        def __init__(self, name: str, batch_size: int = 64) -> None:
+            self.model, self.batch_size = name, batch_size
+
+    monkeypatch.setattr(embed, "SentenceTransformerEmbedder", Fake)
+    e = make_embedder("sentence-transformers:m", batch_size=8)
+    assert isinstance(e, Fake) and e.batch_size == 8
