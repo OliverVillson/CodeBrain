@@ -12,6 +12,7 @@ import hashlib
 import re
 import time
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 import numpy as np
@@ -122,12 +123,23 @@ class CachedEmbedder:
         return self.inner.embed(texts, query=True)
 
 
+@dataclass(frozen=True)
+class Completion:
+    text: str
+    prompt_tokens: int
+    completion_tokens: int
+
+
 class LLM(Protocol):
     name: str
     input_tokens: int
     output_tokens: int
 
     async def complete(self, system: str, user: str, max_tokens: int) -> str: ...
+
+    async def chat(self, system: str, user: str, max_tokens: int) -> Completion:
+        """``complete`` with this call's own token usage."""
+        ...
 
     def count_tokens(self, text: str) -> int: ...
 
@@ -175,6 +187,9 @@ class OpenAILLM:
         self.output_tokens = 0
 
     async def complete(self, system: str, user: str, max_tokens: int) -> str:
+        return (await self.chat(system, user, max_tokens)).text
+
+    async def chat(self, system: str, user: str, max_tokens: int) -> Completion:
         async with self.sem:
             for attempt in range(4):
                 try:
@@ -193,11 +208,13 @@ class OpenAILLM:
                     if attempt == 3:
                         raise
                     await asyncio.sleep(2**attempt)
+        prompt_tokens = completion_tokens = 0
         if r.usage is not None:
-            self.input_tokens += r.usage.prompt_tokens
-            self.output_tokens += r.usage.completion_tokens
+            prompt_tokens, completion_tokens = r.usage.prompt_tokens, r.usage.completion_tokens
+            self.input_tokens += prompt_tokens
+            self.output_tokens += completion_tokens
         text = r.choices[0].message.content or ""
-        return _THINK.sub("", text).strip()
+        return Completion(_THINK.sub("", text).strip(), prompt_tokens, completion_tokens)
 
 
 class FakeLLM:
@@ -210,7 +227,11 @@ class FakeLLM:
         self.count_tokens = _TokenCounter(None)
 
     async def complete(self, system: str, user: str, max_tokens: int) -> str:
-        self.input_tokens += self.count_tokens(system + user)
+        return (await self.chat(system, user, max_tokens)).text
+
+    async def chat(self, system: str, user: str, max_tokens: int) -> Completion:
+        prompt_tokens = self.count_tokens(system + user)
+        self.input_tokens += prompt_tokens
         if "Question:" in user:
             context, question = user.rsplit("Question:", 1)
             words = set(split_identifiers(question))
@@ -221,5 +242,6 @@ class FakeLLM:
             out = best
         else:
             out = " ".join(user.split()[: max_tokens // 2])
-        self.output_tokens += self.count_tokens(out)
-        return out
+        completion_tokens = self.count_tokens(out)
+        self.output_tokens += completion_tokens
+        return Completion(out, prompt_tokens, completion_tokens)

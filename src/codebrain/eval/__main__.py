@@ -1,9 +1,10 @@
-"""``python -m codebrain.eval {retrieval,paging,all}``: run the eval and write a report."""
+"""``python -m codebrain.eval {retrieval,paging,qa,all}``: run the eval and write a report."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import gc
 import json
 import platform
@@ -15,13 +16,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from codebrain.config import get_settings
+from codebrain.eval import codebase_qa as qa
 from codebrain.eval import paging, retrieval
 from codebrain.eval.backends import LLM, CachedEmbedder, Embedder, FakeLLM, HashEmbedder, OpenAILLM
 from codebrain.eval.mine import Git as _Git
 from codebrain.eval.mine import GoldTask, Snapshot, assign_splits, mine_repo, snapshot, task_to_json
 from codebrain.eval.units import is_test_path
 
-DEFAULT_LLM = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+DEFAULT_LLM = "Qwen/Qwen3.8-27B"
 DEFAULT_EMBED = ["Qwen/Qwen3-Embedding-8B"]
 
 
@@ -226,12 +229,112 @@ async def cmd_paging(args: argparse.Namespace, out: Path, llm: LLM) -> dict[str,
     }
 
 
+def check_database(url: str) -> None:
+    """Fail before hours of other work if the store the Q&A benchmark needs is not there."""
+    from codebrain.store import migrate
+
+    try:
+        migrate(url)
+    except Exception as e:
+        raise SystemExit(
+            f"codebase Q&A needs Postgres with pgvector at {url} ({e}). "
+            "Start one with eval/b300/db.sh or set CODEBRAIN_DATABASE_URL."
+        ) from e
+
+
+async def cmd_qa(args: argparse.Namespace, out: Path, llm: LLM) -> dict[str, Any]:
+    root = Path(args.qa_codebase).expanduser().resolve()
+    questions = qa.load_questions(Path(args.qa_questions).expanduser())
+    files = qa.codebase_files(root)
+    codebase = qa.render_codebase(files)
+    codebase_tokens = llm.count_tokens(codebase)
+    if codebase_tokens + args.qa_max_tokens + 1000 > args.max_context:
+        raise SystemExit(
+            f"{root.name} is {codebase_tokens:,} tokens, too big for --max-context "
+            f"{args.max_context:,} in normal mode"
+        )
+    log(f"qa: {len(questions)} questions, {root.name}: {len(files)} files, {codebase_tokens:,} tok")
+
+    # Untimed setup: index the codebase into the store.
+    repo = f"qa-fixture/{root.name}"
+    model = args.embed_model[0]
+    inner = make_embedder(model, args)
+    summarizer: Any
+    if args.fake or args.qa_summarizer == "heuristic":
+        from codebrain.ingest.summarize import HeuristicSummarizer
+
+        summarizer = HeuristicSummarizer()
+    else:
+        summarizer = qa.openai_summarizer(
+            args.llm_model,
+            args.llm_base_url,
+            concurrency=min(args.concurrency, 64),
+            disable_thinking=not args.allow_thinking,
+        )
+    log(f"qa: ingesting {root.name} with {model} (not timed)")
+    stats = qa.ingest_codebase(
+        args.database_url, root, repo, qa.QueryEmbedder(inner, query=False), summarizer
+    )
+    log(f"qa: ingest took {stats.seconds:.1f}s, {stats.units} units")
+    recall = qa.StoreRecall(
+        args.database_url, repo, qa.QueryEmbedder(inner, query=True), args.qa_budget
+    )
+
+    def whole_codebase(_: str) -> tuple[str, list[str]]:
+        return codebase, []
+
+    # Timed: answering only, one question at a time.
+    answers: list[qa.Answer] = []
+    try:
+        for mode, context_for in (("normal", whole_codebase), ("codebrain", recall)):
+            for q in questions:
+                a = await qa.ask(
+                    llm,
+                    q,
+                    mode,
+                    context_for,
+                    llm.count_tokens,
+                    max_tokens=args.qa_max_tokens,
+                    warm_cache=args.qa_warm_cache,
+                )
+                answers.append(a)
+                log(
+                    f"qa {mode} {q.id}: {'correct' if a.correct else 'missing ' + str(a.missing)} "
+                    f"{a.seconds:.2f}s {a.prompt_tokens + a.completion_tokens:,} tokens"
+                )
+    finally:
+        recall.close()
+    del inner
+    free_gpu()
+
+    if not args.fake and not args.no_judge:
+        by_id = {q.id: q for q in questions}
+        verdicts = await asyncio.gather(*(qa.judge(llm, by_id[a.question_id], a) for a in answers))
+        for a, v in zip(answers, verdicts, strict=True):
+            a.judge = v
+
+    with (out / "qa-answers.jsonl").open("w") as f:
+        for a in answers:
+            f.write(json.dumps(qa.answer_to_json(a)) + "\n")
+    return {
+        "codebase": root.name,
+        "files": len(files),
+        "codebase_tokens": codebase_tokens,
+        "budget": args.qa_budget,
+        "warm_cache": args.qa_warm_cache,
+        "questions": [q.id for q in questions],
+        "ingest": dataclasses.asdict(stats),
+        "summary": {m: qa.summarize(answers, m) for m in qa.MODES},
+        "answers": [qa.answer_to_json(a) for a in answers],
+    }
+
+
 def render(meta: dict[str, Any], res: dict[str, Any]) -> str:
     lines = [
         "# Memory eval report",
         "",
         f"- Run: {meta['started']} · host {meta['host']}",
-        f"- LLM: `{meta['llm']}` · repos: {', '.join(meta['repos'])}",
+        f"- LLM: `{meta['llm']}` · repos: {', '.join(meta['repos']) or '–'}",
         f"- LLM tokens: {meta['llm_input_tokens']:,} in / {meta['llm_output_tokens']:,} out",
         "",
     ]
@@ -287,13 +390,15 @@ def render(meta: dict[str, Any], res: dict[str, Any]) -> str:
                 label = k if group == "by_kind" else f"Δ {k} turns"
                 lines.append(f"| {label} | " + " | ".join(cells) + " |")
         lines.append("")
+    if res.get("qa"):
+        lines += qa.render_section(res["qa"])
     return "\n".join(lines)
 
 
 def parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="python -m codebrain.eval")
-    ap.add_argument("command", choices=["retrieval", "paging", "all"])
-    ap.add_argument("--repo", action="append", required=True, help="git URL or local path")
+    ap.add_argument("command", choices=["retrieval", "paging", "qa", "all"])
+    ap.add_argument("--repo", action="append", default=[], help="git URL or local path")
     ap.add_argument("--out", default="eval-results", help="results directory")
     ap.add_argument("--cache", default="~/.cache/codebrain-eval/repos")
     ap.add_argument("--seed", type=int, default=0)
@@ -324,11 +429,25 @@ def parser() -> argparse.ArgumentParser:
     g.add_argument("--low-water", type=float, default=0.50)
     g.add_argument("--memory-budget", type=int, default=2_000)
     g.add_argument("--max-context", type=int, default=131_072)
+    g = ap.add_argument_group("codebase Q&A")
+    g.add_argument("--qa-codebase", default=str(qa.DEFAULT_CODEBASE))
+    g.add_argument("--qa-questions", default=str(qa.DEFAULT_QUESTIONS))
+    g.add_argument("--qa-budget", type=int, default=4_000, help="recall token budget")
+    g.add_argument("--qa-max-tokens", type=int, default=600, help="answer length cap")
+    g.add_argument("--qa-summarizer", choices=["llm", "heuristic"], default="llm")
+    g.add_argument("--qa-warm-cache", action="store_true", help="let the prefix cache be reused")
+    g.add_argument("--no-judge", action="store_true")
+    g.add_argument("--database-url", default=None, help="default CODEBRAIN_DATABASE_URL")
     return ap
 
 
 async def amain(args: argparse.Namespace) -> int:
     args.embed_model = args.embed_model or DEFAULT_EMBED
+    if args.command in ("retrieval", "paging", "all") and not args.repo:
+        raise SystemExit(f"{args.command} needs at least one --repo")
+    if args.command in ("qa", "all"):
+        args.database_url = args.database_url or get_settings().database_url
+        check_database(args.database_url)
     stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     out = Path(args.out) / stamp
     out.mkdir(parents=True, exist_ok=True)
@@ -345,6 +464,8 @@ async def amain(args: argparse.Namespace) -> int:
         res["retrieval"] = await cmd_retrieval(args, out, llm)
     if args.command in ("paging", "all"):
         res["paging"] = await cmd_paging(args, out, llm)
+    if args.command in ("qa", "all"):
+        res["qa"] = await cmd_qa(args, out, llm)
     meta["llm_input_tokens"] = llm.input_tokens
     meta["llm_output_tokens"] = llm.output_tokens
     (out / "results.json").write_text(json.dumps({"meta": meta, **res}, indent=2, default=str))

@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
-# Run Q1 (retrieval, three embedding models) and Q2 (paging vs compaction).
+# Run Q1 (retrieval, three embedding models), Q2 (paging vs compaction) and the codebase
+# Q&A benchmark (normal vs CodeBrain, see qa.sh to run it alone).
 # Extra arguments go to `python -m codebrain.eval`, e.g. --tasks-per-repo 40.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-export LLM_MODEL="${LLM_MODEL:-Qwen/Qwen3-Coder-30B-A3B-Instruct}"
+export LLM_MODEL="${LLM_MODEL:-Qwen/Qwen3.8-27B}"
+export CODEBRAIN_DATABASE_URL="${CODEBRAIN_DATABASE_URL:-postgresql://codebrain:codebrain@localhost:5432/codebrain}"
 PORT="${PORT:-8000}"
 
 # With more than one GPU, keep the LLM and the embedder on separate cards.
 if [ "$(nvidia-smi -L | wc -l)" -gt 1 ]; then
   export LLM_GPUS="${LLM_GPUS:-0}" EMBED_GPU="${EMBED_GPU:-1}" GPU_UTIL="${GPU_UTIL:-0.90}"
 fi
+eval/b300/db.sh
 curl -sf "http://localhost:$PORT/v1/models" >/dev/null || eval/b300/serve.sh
 
 REPOS=(--repo https://github.com/encode/httpx --repo https://github.com/pallets/click)

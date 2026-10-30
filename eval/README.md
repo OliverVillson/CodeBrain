@@ -13,6 +13,10 @@ with open-weight models:
   asks about them at the end under three arms: full transcript, LLM compaction, and
   paging with recall. Same window and memory budget for both memory arms.
 - **Q4** timings and token counts are logged along the way.
+- **Codebase Q&A, normal vs CodeBrain.** Ten questions about a fixture codebase,
+  answered once with the whole codebase in the prompt (normal) and once with
+  `ContextBroker.recall` over the ingested codebase (codebrain). Reports correctness,
+  wall-clock time and tokens per question and in total. See below.
 
 Q3 (agent A/B on real tasks) is not in here yet.
 
@@ -28,7 +32,9 @@ eval/b300/setup.sh                 # uv venv + vLLM + sentence-transformers, che
 EXTRA_REPO=https://github.com/you/your-repo eval/b300/run.sh
 ```
 
-`run.sh` starts vLLM if nothing is serving on port 8000, then runs everything. Results go
+`run.sh` starts Postgres (`db.sh`, via `docker compose`) and vLLM if they are not
+already up, then runs everything. `eval/b300/qa.sh` runs only the codebase Q&A
+benchmark. Results go
 to `eval-results/<timestamp>/`:
 
 | File | What |
@@ -38,6 +44,7 @@ to `eval-results/<timestamp>/`:
 | `goldset.jsonl` | The mined tasks and their relevant units. Prune these by hand to firm up the labels. |
 | `rankings-<model>.jsonl` | Top 20 per task, query variant and config, for digging into misses. |
 | `paging-probes.jsonl` | Every probe with arm, distance, answer and whether it was right. |
+| `qa-answers.jsonl` | Every Q&A answer with mode, timings, tokens, missing facts, judge verdict and recalled units. |
 
 Set `EXTRA_REPO` to one of your own repos with real history. Public repos like httpx and
 click are probably in the model's training data, so your own repo is the
@@ -47,17 +54,64 @@ contamination-free check.
 
 | Role | Default | Change with |
 | --- | --- | --- |
-| LLM (summaries, HyDE, paraphrase, compaction, answering probes) | `Qwen/Qwen3-Coder-30B-A3B-Instruct` via vLLM | `LLM_MODEL=...` |
+| LLM (summaries, HyDE, paraphrase, compaction, answering probes and Q&A) | `Qwen/Qwen3.8-27B` via vLLM | `LLM_MODEL=...` |
 | Embeddings, compared side by side | `Qwen/Qwen3-Embedding-8B`, `Qwen/Qwen3-Embedding-0.6B`, `BAAI/bge-m3` | `--embed-model` (repeat) |
+
+Qwen3.8-27B needs vLLM 0.17 or newer (pinned in `eval/requirements.txt`). Its weights
+are about 52 GB in BF16, so it fits one B300 with room for the embedder; set
+`LLM_MODEL=Qwen/Qwen3.8-27B-FP8` to halve that. It thinks by default; the harness turns
+thinking off on every request (`--allow-thinking` turns it back on), so token counts are
+answers, not reasoning traces. `serve.sh` passes anything in `VLLM_ARGS` through to
+`vllm serve`. To go back to the previous default, `LLM_MODEL=Qwen/Qwen3-Coder-30B-A3B-Instruct`.
 
 Any OpenAI-compatible server works for the LLM (`--llm-base-url`). For a bigger model,
 for example `LLM_MODEL=openai/gpt-oss-120b`, nothing else changes. With more than one GPU,
 `run.sh` puts the LLM on GPU 0 and the embedder on GPU 1; set `TP=n` to shard the LLM.
 
+## Codebase Q&A benchmark
+
+```sh
+eval/b300/qa.sh                     # or: python -m codebrain.eval qa --fake  (CPU smoke test)
+```
+
+The codebase is `eval/fixtures/tidepool`, a job queue library (about 2,200 lines, 25
+files, roughly 20k tokens) written for this benchmark, so no model has seen it in
+training. The questions and reference answers are in `eval/fixtures/tidepool-questions.json`.
+Each needs specific names and numbers, often from more than one file, and several have a
+look-alike elsewhere in the code (for example the webhook retry schedule versus the job
+retry backoff).
+
+How it runs:
+
+1. **Ingest, not timed.** The fixture is ingested into Postgres with the real
+   `Ingestor` (AST chunks, LLM summaries from the same vLLM model, vectors from the
+   first `--embed-model`, code graph). Its time is reported on its own line and is not
+   part of any measurement.
+2. **Normal.** For each question, one LLM call with every file ingest would index in
+   the prompt, then the question.
+3. **CodeBrain.** For each question, `ContextBroker.recall(question, --qa-budget)` (4,000
+   tokens by default), then one LLM call with the recalled units as the context. The
+   timed span is recall plus the call.
+
+Questions are asked one at a time, so the times are latency, not throughput. Each
+request starts with a unique line so vLLM's prefix cache cannot reuse the codebase from
+the previous question; `--qa-warm-cache` allows the reuse (closer to a long agent session
+with caching, and much kinder to normal mode). Tokens are the server's prompt and
+completion counts.
+
+An answer is **correct** when every required fact in the questions file matches (a few
+regexes per fact). The same model then grades each answer against the reference as
+CORRECT, PARTIAL or INCORRECT (`--no-judge` skips that); judge calls are not counted in
+either mode's tokens or time.
+
+Useful flags: `--qa-budget 8000`, `--qa-summarizer heuristic` (docstring summaries,
+faster ingest), `--qa-codebase PATH --qa-questions FILE` for your own codebase and
+questions, `--database-url`.
+
 ## Useful flags
 
 ```sh
-python -m codebrain.eval {retrieval|paging|all} --repo URL_OR_PATH [--repo ...]
+python -m codebrain.eval {retrieval|paging|qa|all} --repo URL_OR_PATH [--repo ...]
   --tasks-per-repo 20      # gold tasks mined per repo
   --no-summaries           # skip the LLM summary view (much faster ingest)
   --no-hyde --no-paraphrase
