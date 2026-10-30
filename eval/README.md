@@ -146,6 +146,15 @@ vectors and docstring summaries; those numbers only compare configurations with 
 other). Recall settings are environment variables, for example
 `CODEBRAIN_RETRIEVAL__MIN_RELATIVE_SCORE=0.4`.
 
+With more than one `--embed-model`, `--qa-recall-only` compares embedders: the codebase
+is ingested once (units, LLM summaries, graph) and each further model only adds its
+vectors, so every embedder sees the same units. The report gets an "embedders compared"
+table: gold files and facts recall put in context, and a dense-only ranking (units by
+cosine alone, before lexical, symbol and graph signals) that isolates the embedder, with
+query embedding time. `eval/b300/compare-embedders.sh MODEL...` runs it against
+Qwen3-Embedding-8B; a local folder works as a model. Training a CodeBrain-specific
+embedder is in [`eval/embedder/`](embedder/README.md).
+
 Useful flags: `--qa-budget 8000`, `--qa-k N` (pack only the top N recall results; it
 also turns off the one-line signatures recall adds for what did not fit),
 `--qa-rerank` (the served model picks among the top 30 recall candidates, one short
