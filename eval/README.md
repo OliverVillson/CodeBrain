@@ -26,11 +26,23 @@ in the same table.
 
 ## Run it
 
+On a fresh Ubuntu 24.04 VM with the NVIDIA driver installed, as your own user (not
+root, not sudo):
+
 ```sh
 git clone https://github.com/OliverVillson/CodeBrain && cd CodeBrain
-eval/b300/setup.sh                 # uv venv + vLLM + sentence-transformers, checks the GPU arch
-EXTRA_REPO=https://github.com/you/your-repo eval/b300/run.sh
+eval/b300/setup.sh                 # apt packages, uv venv + vLLM + sentence-transformers, GPU check
+tmux new -s eval                   # an SSH drop kills anything outside tmux
+eval/b300/qa.sh --qa-budget 8000   # codebase Q&A only, about an hour
+EXTRA_REPO=https://github.com/you/your-repo eval/b300/run.sh   # or everything
 ```
+
+`setup.sh` installs what earlier runs were missing (Python headers, gcc, docker with
+compose, tmux) with sudo, and stops if the checkout has files owned by someone else
+(left by an earlier `sudo` run; it prints the `chown` to fix it). Docker runs through
+sudo when you are not in the docker group. vLLM runs with `--enforce-eager` unless you
+set `VLLM_ARGS` (CUDA graph capture has failed on the B300). Detach from tmux with
+`Ctrl-b d` and come back with `tmux attach -t eval`.
 
 `run.sh` starts Postgres (`db.sh`, via `docker compose`) and vLLM if they are not
 already up, then runs everything. `eval/b300/qa.sh` runs only the codebase Q&A
