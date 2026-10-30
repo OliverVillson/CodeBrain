@@ -174,7 +174,8 @@ def _task_for_commit(
     for u in snap.units:
         by_name.setdefault(u.name, []).append(u.key)
 
-    relevant: dict[str, int] = {k: 1 for k in modified_keys if k in {u.key for u in snap.units}}
+    live = {u.key for u in snap.units}
+    relevant: dict[str, int] = {k: 1 for k in modified_keys if k in live}
     for u, refs in added_refs:
         for ref in refs:
             if len(ref) < 3 or ref.startswith("__"):

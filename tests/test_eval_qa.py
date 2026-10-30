@@ -112,3 +112,43 @@ def test_haystack_adds_library_code_round_robin(tmp_path: Path) -> None:
     added = [p for p in paths if p.startswith("libs/lib/")]
     assert added and len(added) < 3  # capped by max_tokens
     assert not any("tests/" in p for p in added)
+
+
+def test_default_haystack_expands_anywhere_in_the_list() -> None:
+    from codebrain.eval.__main__ import expand_haystack
+
+    got = expand_haystack(["https://example.com/x@1", "default"])
+    assert got[0] == "https://example.com/x@1" and "default" not in got
+    assert got[1:] == list(qa.DEFAULT_HAYSTACK)
+
+
+def test_checkout_tmp_dir_keeps_dotted_ref(tmp_path: Path) -> None:
+    lib = tmp_path / "rq"
+    lib.mkdir()
+    (lib / "a.py").write_text("x = 1\n")
+    for args in (
+        ["init", "-q"],
+        ["add", "."],
+        ["-c", "user.name=t", "-c", "user.email=t@e", "commit", "-qm", "x"],
+        ["tag", "v1.2"],
+    ):
+        subprocess.run(["git", "-C", str(lib), *args], check=True)
+    cache = tmp_path / "cache"
+    # Another clone in progress (rq@v1.3 used to share this tmp dir name).
+    other = cache / "rq@v1.tmp"
+    other.mkdir(parents=True)
+    (other / "marker").write_text("busy")
+    name, dest = qa.checkout(f"file://{lib}@v1.2", cache)
+    assert (name, dest.name) == ("rq", "rq@v1.2") and (dest / "a.py").exists()
+    assert (other / "marker").exists()
+
+
+def test_store_recall_holds_no_open_transaction(database_url: str) -> None:
+    from tests.fakes import HashEmbedder
+
+    recall = qa.StoreRecall(database_url, "nothing-here", HashEmbedder("t"), budget=1000)
+    try:
+        recall("where is the retry policy?")
+        assert recall.conn.info.transaction_status is psycopg.pq.TransactionStatus.IDLE
+    finally:
+        recall.close()

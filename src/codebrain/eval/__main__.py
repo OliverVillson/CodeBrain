@@ -480,12 +480,20 @@ def parser() -> argparse.ArgumentParser:
     return ap
 
 
+def expand_haystack(specs: list[str]) -> list[str]:
+    """``default`` anywhere in ``--qa-haystack`` stands for the built-in haystack repos."""
+    out: list[str] = []
+    for spec in specs:
+        out.extend(qa.DEFAULT_HAYSTACK if spec == "default" else [spec])
+    return list(dict.fromkeys(out))
+
+
 async def amain(args: argparse.Namespace) -> int:
     args.embed_model = args.embed_model or DEFAULT_EMBED
     if args.command in ("retrieval", "paging", "all") and not args.repo:
         raise SystemExit(f"{args.command} needs at least one --repo")
-    if args.qa_haystack == ["default"]:
-        args.qa_haystack = list(qa.DEFAULT_HAYSTACK)
+    if args.qa_haystack and "default" in args.qa_haystack:
+        args.qa_haystack = expand_haystack(args.qa_haystack)
     if args.command in ("qa", "all"):
         args.database_url = args.database_url or get_settings().database_url
         check_database(args.database_url)

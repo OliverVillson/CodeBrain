@@ -35,5 +35,5 @@ if ! reachable; then
   for _ in $(seq 60); do reachable && break; sleep 2; done
   reachable || { echo "Postgres did not come up:"; "${DOCKER[@]}" compose logs --tail 30 db; exit 1; }
 fi
-"$(dirname "$PY")/codebrain" migrate >/dev/null
+"$PY" -m codebrain.cli migrate >/dev/null
 echo "Store ready at $CODEBRAIN_DATABASE_URL"

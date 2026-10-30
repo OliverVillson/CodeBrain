@@ -12,11 +12,14 @@ from codebrain.config import get_settings
 
 
 def connect(url: str | None = None, *, autocommit: bool = False) -> psycopg.Connection:
-    conn = psycopg.connect(url or get_settings().database_url, autocommit=autocommit)
+    # Register in autocommit mode: the catalog lookup would otherwise open a transaction
+    # that stays "idle in transaction" until the caller's first commit.
+    conn = psycopg.connect(url or get_settings().database_url, autocommit=True)
     # The vector extension is created by the first migration; callers that run
     # migrations on a fresh database connect before it exists.
     with suppress(psycopg.ProgrammingError):
         register_vector(conn)
+    conn.autocommit = autocommit
     return conn
 
 
