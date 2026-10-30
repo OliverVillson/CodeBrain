@@ -296,11 +296,27 @@ async def cmd_qa(args: argparse.Namespace, out: Path, llm: LLM) -> dict[str, Any
             concurrency=min(args.concurrency, 64),
             disable_thinking=not args.allow_thinking,
         )
-    log(f"qa: ingesting {root.name} with {model} (not timed)")
-    stats = qa.ingest_codebase(
-        args.database_url, root, repo, qa.QueryEmbedder(inner, query=False), summarizer
-    )
-    log(f"qa: ingest took {stats.seconds:.1f}s, {stats.units} units")
+    progress = out / "qa-progress.jsonl"
+    done = {(a.question_id, a.mode): a for a in qa.load_progress(progress)}
+    saved = out / "qa-ingest.json"
+    stats = qa.load_ingest(saved)
+    if (
+        stats is not None
+        and stats.embedder == qa.QueryEmbedder(inner, query=False).model
+        and stats.units == qa.stored_units(args.database_url, repo)
+    ):
+        log(f"qa: resuming {out}: {len(done)} answers done, reusing the ingested index")
+    else:
+        if any(m != "normal" for _, m in done):
+            # CodeBrain answers came from the old index; a new ingest invalidates them.
+            done = {k: a for k, a in done.items() if k[1] == "normal"}
+            qa.save_progress(progress, done.values())
+        log(f"qa: ingesting {root.name} with {model} (not timed)")
+        stats = qa.ingest_codebase(
+            args.database_url, root, repo, qa.QueryEmbedder(inner, query=False), summarizer
+        )
+        saved.write_text(json.dumps(dataclasses.asdict(stats)))
+        log(f"qa: ingest took {stats.seconds:.1f}s, {stats.units} units")
     if args.qa_query_instruction != "none" and hasattr(inner, "query_instruction"):
         inner.query_instruction = args.qa_query_instruction
     reranker = None
@@ -330,7 +346,10 @@ async def cmd_qa(args: argparse.Namespace, out: Path, llm: LLM) -> dict[str, Any
         if args.qa_recall_only:
             modes = ()
             for q in questions:
+                if (q.id, "codebrain") in done:
+                    continue
                 a = qa.probe(q, recall, llm.count_tokens)
+                qa.append_progress(progress, a)
                 answers.append(a)
                 log(
                     f"qa recall {q.id}: gold {len(a.files_hit)}/{len(a.expected_files)}, facts "
@@ -338,6 +357,8 @@ async def cmd_qa(args: argparse.Namespace, out: Path, llm: LLM) -> dict[str, Any
                 )
         for mode, context_for in modes:
             for q in questions:
+                if (q.id, mode) in done:
+                    continue
                 a = await qa.ask(
                     llm,
                     q,
@@ -347,6 +368,7 @@ async def cmd_qa(args: argparse.Namespace, out: Path, llm: LLM) -> dict[str, Any
                     max_tokens=args.qa_max_tokens,
                     warm_cache=args.qa_warm_cache,
                 )
+                qa.append_progress(progress, a)
                 answers.append(a)
                 log(
                     f"qa {mode} {q.id}: {'correct' if a.correct else 'missing ' + str(a.missing)} "
@@ -354,6 +376,14 @@ async def cmd_qa(args: argparse.Namespace, out: Path, llm: LLM) -> dict[str, Any
                 )
     finally:
         recall.close()
+    # In question order per mode, whichever run answered them.
+    done.update(((a.question_id, a.mode), a) for a in answers)
+    answers = [
+        done[(q.id, m)]
+        for m in (("codebrain",) if args.qa_recall_only else qa.MODES)
+        for q in questions
+        if (q.id, m) in done
+    ]
     del inner
     free_gpu()
 
@@ -503,6 +533,12 @@ def parser() -> argparse.ArgumentParser:
     g.add_argument("--qa-warm-cache", action="store_true", help="let the prefix cache be reused")
     g.add_argument("--no-judge", action="store_true")
     g.add_argument(
+        "--qa-resume",
+        metavar="RUN_DIR",
+        help="continue a stopped run in RUN_DIR ('last' = newest): reuse its index and "
+        "answers, ask only the questions it had not finished",
+    )
+    g.add_argument(
         "--qa-rerank",
         action="store_true",
         help="let the served LLM pick among the top recall candidates (one extra call each)",
@@ -520,6 +556,20 @@ def parser() -> argparse.ArgumentParser:
     )
     g.add_argument("--database-url", default=None, help="default CODEBRAIN_DATABASE_URL")
     return ap
+
+
+def resume_dir(spec: str, results: Path) -> Path:
+    """The run directory ``--qa-resume`` names: a path, or ``last`` for the newest one
+    under ``results`` with Q&A progress in it."""
+    if spec == "last":
+        runs = sorted(p.parent for p in results.glob("*/qa-progress.jsonl"))
+        if not runs:
+            raise SystemExit(f"--qa-resume last: no run with qa-progress.jsonl under {results}")
+        return runs[-1]
+    path = Path(spec)
+    if not (path / "qa-progress.jsonl").exists():
+        raise SystemExit(f"--qa-resume: {path} has no qa-progress.jsonl to resume from")
+    return path
 
 
 def expand_haystack(specs: list[str]) -> list[str]:
@@ -540,7 +590,7 @@ async def amain(args: argparse.Namespace) -> int:
         args.database_url = args.database_url or get_settings().database_url
         check_database(args.database_url)
     stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-    out = Path(args.out) / stamp
+    out = resume_dir(args.qa_resume, Path(args.out)) if args.qa_resume else Path(args.out) / stamp
     out.mkdir(parents=True, exist_ok=True)
     llm = make_llm(args)
     meta: dict[str, Any] = {

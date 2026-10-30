@@ -26,8 +26,8 @@ import shutil
 import subprocess
 import time
 import uuid
-from collections.abc import Callable, Sequence
-from dataclasses import asdict, dataclass, field
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -346,6 +346,36 @@ def answer_to_json(a: Answer) -> dict[str, Any]:
     return {**asdict(a), "correct": a.correct}
 
 
+def answer_from_json(d: dict[str, Any]) -> Answer:
+    names = {f.name for f in fields(Answer)}
+    return Answer(**{k: v for k, v in d.items() if k in names})
+
+
+# Progress: every answer is appended as soon as it exists, so a stopped run can resume.
+
+
+def append_progress(path: Path, a: Answer) -> None:
+    with path.open("a") as f:
+        f.write(json.dumps(answer_to_json(a)) + "\n")
+
+
+def save_progress(path: Path, answers: Iterable[Answer]) -> None:
+    path.write_text("".join(json.dumps(answer_to_json(a)) + "\n" for a in answers))
+
+
+def load_progress(path: Path) -> list[Answer]:
+    """Answers saved so far; a line cut off by the interruption is ignored."""
+    if not path.exists():
+        return []
+    out = []
+    for line in path.read_text().splitlines():
+        try:
+            out.append(answer_from_json(json.loads(line)))
+        except (json.JSONDecodeError, TypeError):
+            continue
+    return out
+
+
 # CodeBrain side: ingest (untimed) and recall (timed).
 
 
@@ -457,6 +487,23 @@ class IngestStats:
     summarizer: str
     embedder: str
     errors: list[str]
+
+
+def load_ingest(path: Path) -> IngestStats | None:
+    try:
+        return IngestStats(**json.loads(path.read_text()))
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def stored_units(database_url: str, repo: str) -> int:
+    """Units indexed under ``repo``: a resumed run reuses the index only if it is intact."""
+    from codebrain.store import connection, migrate
+
+    migrate(database_url)
+    with connection(database_url) as conn:
+        row = conn.execute("SELECT count(*) FROM units WHERE repo = %s", (repo,)).fetchone()
+    return int(row[0]) if row else 0
 
 
 def ingest_codebase(
