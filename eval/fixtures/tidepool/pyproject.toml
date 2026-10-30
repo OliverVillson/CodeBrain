@@ -1,0 +1,9 @@
+[project]
+name = "tidepool"
+version = "0.9.3"
+description = "Background job queue with leases, retries and dead-lettering"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+tidepool = "tidepool.cli:main"

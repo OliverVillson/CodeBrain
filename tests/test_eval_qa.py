@@ -1,0 +1,55 @@
+import asyncio
+import json
+from pathlib import Path
+
+import psycopg
+import pytest
+
+from codebrain.eval import codebase_qa as qa
+from codebrain.eval.__main__ import amain, parser
+
+
+def test_reference_answers_pass_their_own_facts() -> None:
+    questions = qa.load_questions(qa.DEFAULT_QUESTIONS)
+    assert len(questions) == 10
+    assert len({q.id for q in questions}) == 10
+    for q in questions:
+        assert qa.grade(q.answer, q) == [], q.id
+
+
+def test_distractor_answer_fails() -> None:
+    backoff = qa.load_questions(qa.DEFAULT_QUESTIONS)[0]
+    # The webhook delivery schedule is a look-alike for the job retry delay.
+    assert len(qa.grade("Retries wait 1, 5 and 25 seconds between tries.", backoff)) >= 3
+
+
+def test_both_modes_see_the_same_files() -> None:
+    files = dict(qa.codebase_files(qa.DEFAULT_CODEBASE))
+    assert "tidepool/retry.py" in files
+    assert "tidepool/webhooks.py" in files
+    context = qa.render_codebase(sorted(files.items()))
+    assert "### tidepool/retry.py" in context
+
+
+@pytest.mark.db
+def test_fake_run_writes_report(database_url: str, tmp_path: Path) -> None:
+    args = parser().parse_args(
+        ["qa", "--fake", "--out", str(tmp_path), "--database-url", database_url]
+    )
+    try:
+        assert asyncio.run(amain(args)) == 0
+    finally:
+        # The run commits its index; drop it so other tests see their own units only.
+        with psycopg.connect(database_url, autocommit=True) as conn:
+            conn.execute("DELETE FROM units WHERE repo = 'qa-fixture/tidepool'")
+    [run] = list(tmp_path.iterdir())
+    res = json.loads((run / "results.json").read_text())["qa"]
+    normal, codebrain = res["summary"]["normal"], res["summary"]["codebrain"]
+    assert normal["questions"] == codebrain["questions"] == 10
+    assert res["ingest"]["units"] > 50
+    # CodeBrain's context is capped by the recall budget; normal sends everything.
+    assert codebrain["mean_context_tokens"] <= res["budget"] < normal["mean_context_tokens"]
+    assert codebrain["recall_seconds"] > 0 and normal["recall_seconds"] < 0.01
+    answers = [json.loads(line) for line in (run / "qa-answers.jsonl").open()]
+    assert all(a["recalled"] for a in answers if a["mode"] == "codebrain")
+    assert "Codebase Q&A" in (run / "report.md").read_text()

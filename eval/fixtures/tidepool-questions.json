@@ -1,0 +1,112 @@
+{
+  "codebase": "tidepool",
+  "description": "Ten questions about eval/fixtures/tidepool, a fictional job queue written for this benchmark so no model has seen it in training. Each answer needs facts from one or more files; several have a look-alike distractor elsewhere in the code. An answer is correct when every fact matches (any one pattern per fact, case-insensitive regex).",
+  "questions": [
+    {
+      "id": "q01-backoff",
+      "question": "When a job handler raises an ordinary exception, how is the delay before the next attempt computed, and what are the default minimum and maximum delays?",
+      "answer": "Decorrelated jitter in tidepool/retry.py: each delay is drawn uniformly between backoff_base and 3x the previous delay, then capped: min(cap, uniform(base, 3 * prev)). Defaults are backoff_base = 2 s and backoff_cap = 900 s (15 minutes). (The 1/5/25 s schedule in webhooks.py is for webhook delivery, not jobs.)",
+      "facts": [
+        {"label": "random/jitter between base and 3x previous", "any": ["decorrelated", "jitter", "uniform"]},
+        {"label": "3x multiplier", "any": ["\\b3\\s*(x|\\*|×|times)", "three times", "JITTER_MULTIPLIER", "(x|\\*|×)\\s*3\\b"]},
+        {"label": "base 2 s", "any": ["\\b2(\\.0)?\\s*(s\\b|sec|second)", "backoff_base\\D{0,20}2\\b", "base\\D{0,15}2(\\.0)?\\b"]},
+        {"label": "cap 900 s", "any": ["\\b900\\b", "15 ?min"]}
+      ]
+    },
+    {
+      "id": "q02-dead-letter",
+      "question": "When does a failing job end up in the dead-letter queue, and how can a single task allow more or fewer attempts than the default?",
+      "answer": "After max_attempts attempts (default 7 in Settings), or immediately when the handler raises PermanentError (also TaskNotFound or PayloadError), or when the lease expires on its last attempt. A task overrides the limit with @task(max_attempts=N); a single job can also pass max_attempts to enqueue. RetryAfter does not count as an attempt.",
+      "facts": [
+        {"label": "default 7 attempts", "any": ["\\b7\\b", "seven"]},
+        {"label": "PermanentError skips retries", "any": ["PermanentError"]},
+        {"label": "per-task override via @task(max_attempts=...)", "any": ["@task\\s*\\([^)]*max_attempts", "max_attempts\\W{0,40}(@task|task decorator|decorator)", "(@task|task decorator|decorator)\\W{0,80}max_attempts"]}
+      ]
+    },
+    {
+      "id": "q03-config-precedence",
+      "question": "If lease_seconds is set both in tidepool.toml and in the environment, which value wins, what is the environment variable called, and is there anything that overrides both?",
+      "answer": "The environment wins over the file: TIDEPOOL_LEASE_SECONDS. Order is defaults < [tidepool] table in tidepool.toml (or TIDEPOOL_CONFIG) < TIDEPOOL_* env vars < keyword overrides passed to load_settings(), which override both.",
+      "facts": [
+        {"label": "env var name", "any": ["TIDEPOOL_LEASE_SECONDS"]},
+        {"label": "env beats file", "any": ["environment\\W[^.]{0,80}(wins|overrid|take|preced|higher)", "env[^.]{0,40}(wins|overrid|take|preced|higher)", "(wins|overrid|preced)[^.]{0,60}(env|environment)"]},
+        {"label": "load_settings keyword overrides beat both", "any": ["load_settings", "keyword", "overrides\\b", "\\*\\*overrides"]}
+      ]
+    },
+    {
+      "id": "q04-lease-keepalive",
+      "question": "How does a worker keep its lease on a long-running job, how often, and what happens to the job if the worker process dies mid-run?",
+      "answer": "A Heartbeat thread in worker.py calls Queue.renew every heartbeat_interval = lease_seconds / heartbeat_divisor (60/3 = 20 s by default). If the worker dies the lease expires; worker housekeeping calls Queue.reap_expired every reap_interval_seconds (15 s), which puts the job back to queued (runnable now) and counts the lost run as an attempt, dead-lettering it if that was the last attempt.",
+      "facts": [
+        {"label": "heartbeat renews the lease", "any": ["heartbeat", "renew"]},
+        {"label": "every lease/3 = 20 s", "any": ["\\b20\\s*(s\\b|sec)", "lease_seconds\\s*/\\s*(3|heartbeat_divisor)", "third of the lease", "/\\s*3\\b"]},
+        {"label": "reaper returns expired leases", "any": ["reap"]},
+        {"label": "counts as an attempt", "any": ["attempt"]}
+      ]
+    },
+    {
+      "id": "q05-priority-aging",
+      "question": "How does tidepool stop low-priority jobs from starving behind high-priority ones? Give the exact numbers.",
+      "answer": "Priority aging in priority.py: effective priority = base priority + one step per 90 seconds waited (AGING_STEP_SECONDS), at most +5 (MAX_AGING_BOOST), clamped to the maximum priority 9. Leasing orders by effective priority, then by how long the job has been runnable.",
+      "facts": [
+        {"label": "aging", "any": ["aging", "ageing", "effective priority", "effective_priority"]},
+        {"label": "90 s per step", "any": ["\\b90\\b"]},
+        {"label": "boost capped at +5", "any": ["\\+\\s*5\\b", "\\b5 (steps|levels|points)", "MAX_AGING_BOOST", "at most 5", "max(imum)? (boost )?(of )?5\\b", "capped at 5"]},
+        {"label": "max priority 9", "any": ["\\b9\\b"]}
+      ]
+    },
+    {
+      "id": "q06-webhook-signature",
+      "question": "How are the webhook calls for dead jobs signed, which header carries the signature, and how does a receiver reject replayed requests?",
+      "answer": "HMAC-SHA256 keyed with webhook_secret over the timestamp, a dot and the raw body (f\"{t}.\" + body). Sent in the X-Tidepool-Signature header as t=<unix seconds>,v1=<hex>. webhooks.verify rejects signatures more than 300 seconds (5 minutes) from the receiver's clock and compares with hmac.compare_digest.",
+      "facts": [
+        {"label": "HMAC-SHA256", "any": ["hmac[- _]?sha-?256", "sha-?256[^.]{0,40}hmac", "hmac[^.]{0,60}sha-?256"]},
+        {"label": "header name", "any": ["X-Tidepool-Signature"]},
+        {"label": "timestamp + body signed", "any": ["timestamp[^.]{0,60}(dot|\\.|body)", "t=\\S*,\\s*v1="]},
+        {"label": "300 s tolerance", "any": ["\\b300\\b", "5 ?min", "five minutes"]}
+      ]
+    },
+    {
+      "id": "q07-payload-compression",
+      "question": "When are job payloads compressed, with what, and how does the decoder know whether a stored payload is compressed?",
+      "answer": "payload.py compresses the JSON with zlib (level 6) when it is longer than COMPRESS_THRESHOLD = 4096 bytes, and only if that makes it smaller. Every encoded payload starts with a one-byte header: b\"j\" for raw JSON, b\"z\" for zlib; decode switches on that byte.",
+      "facts": [
+        {"label": "zlib", "any": ["zlib"]},
+        {"label": "threshold 4096 bytes", "any": ["4096", "4 ?ki?b"]},
+        {"label": "header byte j / z", "any": ["b?[\"']z[\"']", "header byte", "first byte", "prefix byte", "one[- ]byte"]}
+      ]
+    },
+    {
+      "id": "q08-scheduler-misfire",
+      "question": "The scheduler process was down for an hour. What happens to the periodic jobs that should have run during that time when it starts again?",
+      "answer": "Missed runs are never replayed one by one. On the first tick after the due time, a run that is at most misfire_grace_seconds (60 s) late is enqueued once (coalesced); anything later than that, like after an hour of downtime, is skipped and logged. The next due time is computed from now, so there is no burst.",
+      "facts": [
+        {"label": "skipped, not replayed", "any": ["skip"]},
+        {"label": "60 s misfire grace", "any": ["\\b60\\s*(s\\b|sec)", "misfire_grace", "grace[^.]{0,30}60"]},
+        {"label": "next run computed from now", "any": ["from (the current time|now)", "\\bnow\\b", "no burst", "following\\("]}
+      ]
+    },
+    {
+      "id": "q09-dlq-requeue",
+      "question": "How does an operator send dead-lettered jobs back to the queue from the command line, what does requeueing reset on each job, and how long are dead jobs kept if nobody requeues them?",
+      "answer": "tidepool dlq requeue QUEUE --id JOB_ID (repeatable) or --all. deadletter.requeue sets state back to queued, attempts to 0, clears last_error and the backoff (last_delay) and finished_at, and makes it runnable now; priority and dedupe key are kept. Unrequeued dead jobs are purged after dlq_retention_days = 14 days (tidepool dlq purge or the worker's daily housekeeping).",
+      "facts": [
+        {"label": "CLI command", "any": ["dlq requeue"]},
+        {"label": "attempts reset to 0", "any": ["attempts[^.]{0,25}\\b(0|zero)\\b", "\\b(0|zero)\\b\\W{0,10}attempts", "reset[^.]{0,40}attempt"]},
+        {"label": "error cleared", "any": ["last_error", "error"]},
+        {"label": "14 days retention", "any": ["\\b14\\b", "fourteen", "two weeks"]}
+      ]
+    },
+    {
+      "id": "q10-rate-limit",
+      "question": "How does per-queue rate limiting work, what burst is used when the limit does not specify one, and what does a worker do when it is rate limited?",
+      "answer": "A token bucket per queue (ratelimit.py), configured like emails=50/s (or /m, /h), optionally with :burst. Without an explicit burst the bucket holds two seconds' worth of tokens, max(1, 2 * rate per second). The worker asks for a token before leasing; if none is available it does not lease, it sleeps for the time until the next token, so the job keeps its place and is not charged an attempt. Buckets are per worker process.",
+      "facts": [
+        {"label": "token bucket", "any": ["token bucket", "TokenBucket"]},
+        {"label": "burst = 2x rate", "any": ["two seconds", "2 seconds", "2\\s*(x|\\*|×)\\s*(the )?rate", "twice", "DEFAULT_BURST_SECONDS", "2 \\* rate"]},
+        {"label": "sleeps instead of leasing", "any": ["sleep", "wait"]},
+        {"label": "before leasing / no attempt charged", "any": ["before leas", "not leas", "doesn'?t leas", "without leasing", "no attempt", "not (charged|count)"]}
+      ]
+    }
+  ]
+}
