@@ -75,7 +75,12 @@ def personalized_pagerank(
     w = np.array([e.effective_weight for e in edge_list] * 2, dtype=float)
     out_weight = np.bincount(src, weights=w, minlength=n) if len(w) else np.zeros(n)
     dangling = out_weight == 0
-    trans = w / out_weight[src] if len(w) else w
+    # Zero-weight edges are allowed; a node whose edges all weigh 0 is dangling, not NaN.
+    trans = (
+        np.divide(w, out_weight[src], out=np.zeros_like(w), where=out_weight[src] > 0)
+        if len(w)
+        else w
+    )
 
     r = sigma.copy()
     for _ in range(iterations):

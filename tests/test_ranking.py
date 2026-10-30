@@ -103,8 +103,8 @@ def test_mmr_demotes_near_duplicates() -> None:
 
 
 def test_pack_respects_budget_and_upgrades_best_first() -> None:
-    big = _unit(id="big", signature="def big()", summary="Does the big thing.", tokens=400)
-    small = _unit(id="small", signature="def small()", summary="Small.", tokens=50)
+    big = _unit(id="big", signature="def big()", summary="Does the big thing.", text="w " * 400)
+    small = _unit(id="small", signature="def small()", summary="Small.", text="w " * 50)
     cands = {"big": pack.options(big, 0.9), "small": pack.options(small, 0.5)}
 
     roomy = pack.pack(cands, 10_000)
@@ -119,6 +119,30 @@ def test_pack_respects_budget_and_upgrades_best_first() -> None:
     assert tight["big"].resolution is not Resolution.FULL
 
     assert pack.pack(cands, 0) == {}
+
+
+def test_pack_prices_every_resolution_on_one_scale() -> None:
+    # A short unit with a long summary: its full text is the cheaper view, whatever
+    # ``unit.tokens`` says (it came from another counter).
+    u = _unit(
+        text="def f(): return 1", summary="Returns one. " * 30, signature="def f()", tokens=900
+    )
+    by_res = {o.resolution: o.tokens for o in pack.options(u, 1.0)}
+    for r, t in by_res.items():
+        assert t == pack.estimate_tokens(pack.render(u, r))
+    assert by_res[Resolution.FULL] < by_res[Resolution.SUMMARY]
+    chosen = pack.pack({"u": pack.options(u, 1.0)}, by_res[Resolution.FULL])
+    assert chosen["u"].resolution is Resolution.FULL
+
+
+def test_pagerank_with_zero_weight_edges_has_no_nan() -> None:
+    edges = [
+        Edge(src_id="a", dst_id="b", type=EdgeType.CALLS, weight=0.0),
+        Edge(src_id="a", dst_id="c", type=EdgeType.CALLS),
+    ]
+    r = personalized_pagerank({"b": 1.0}, edges, beta=0.5)
+    assert all(v == v for v in r.values())  # no NaN
+    assert r["b"] == pytest.approx(1.0) and r["c"] == 0.0
 
 
 def test_pack_skips_missing_resolutions() -> None:
