@@ -8,6 +8,13 @@ command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 
 uv venv .venv-eval --python 3.12
+# Triton (under vLLM) compiles a C helper at startup and needs gcc and Python.h for that.
+PY_INCLUDE="$(.venv-eval/bin/python -c 'import sysconfig; print(sysconfig.get_paths()["include"])')"
+if [ ! -f "$PY_INCLUDE/Python.h" ] || ! command -v gcc >/dev/null; then
+  echo "Missing Python headers ($PY_INCLUDE/Python.h) or gcc. Install them, then rerun:"
+  echo "  sudo apt-get install -y python3.12-dev build-essential"
+  exit 1
+fi
 # --torch-backend=auto picks the PyTorch CUDA build that matches the driver.
 uv pip install --python .venv-eval --torch-backend=auto -e . -r eval/requirements.txt
 
