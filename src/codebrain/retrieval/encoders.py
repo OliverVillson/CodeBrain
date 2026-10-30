@@ -32,11 +32,19 @@ Encoders = Mapping[VectorView, Embedder]
 
 
 def encode_query(encoders: Encoders, query: str) -> dict[VectorView, tuple[str, Vector]]:
-    """Embed ``query`` once per available view: ``{view: (model, unit-length vector)}``."""
+    """Embed ``query`` for every available view: ``{view: (model, unit-length vector)}``.
+
+    Views that share a model (one embedder for summaries and code) share one forward
+    pass: the model id is what selects the stored vectors, so the query vector is the
+    same."""
     out: dict[VectorView, tuple[str, Vector]] = {}
+    by_model: dict[str, Vector] = {}
     for view, enc in encoders.items():
-        [vec] = enc.embed([query])
-        out[view] = (enc.model, normalize(np.asarray(vec, dtype=np.float32)))
+        vec = by_model.get(enc.model)
+        if vec is None:
+            [raw] = enc.embed([query])
+            vec = by_model[enc.model] = normalize(np.asarray(raw, dtype=np.float32))
+        out[view] = (enc.model, vec)
     return out
 
 

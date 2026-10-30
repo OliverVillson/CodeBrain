@@ -3,12 +3,19 @@
 Three indexes: the summary view s_u and code view c_u in ``unit_vectors``
 (cosine, exact scan until an HNSW index exists per model), and the lexical view
 on ``units.lexical`` ranked with ``ts_rank_cd`` as the BM25 stand-in.
+
+``ts_rank_cd`` has no IDF, so terms that occur in a large share of the searched units
+are dropped from the lexical query (``term_stats`` keeps per-repo document
+frequencies), and the rarest terms get a second, AND-ed lexical ranking. Identifiers
+in the query (``TokenBucket.take``, ``MAX_RETRIES``) also get an exact-match ranking,
+``symbol_hits``: the lexical index splits them into common words.
 """
 
 from __future__ import annotations
 
+import math
 import re
-from collections.abc import Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -144,14 +151,148 @@ def lexical_terms(text: str) -> list[str]:
     return list(seen)
 
 
-def lexical_query(text: str) -> str | None:
+def lexical_query(text: str, drop: Collection[str] = ()) -> str | None:
     """An OR ``tsquery`` over the query's terms, or ``None`` if nothing is left.
 
     OR rather than AND because a prompt is a description, not a keyword list;
-    ``ts_rank_cd`` rewards units that match more of it.
+    ``ts_rank_cd`` rewards units that match more of it. Terms in ``drop`` (too common to
+    tell units apart) are left out unless that would leave nothing.
     """
     terms = lexical_terms(text)
-    return " | ".join(terms) if terms else None
+    kept = [t for t in terms if t not in drop] or terms
+    return " | ".join(kept) if kept else None
+
+
+def rare_query(terms: Sequence[str], df: Mapping[str, int], n: int = 2) -> str | None:
+    """An AND ``tsquery`` over the ``n`` rarest terms that occur at all, or ``None``."""
+    present = sorted((t for t in terms if df.get(t, 0) > 0), key=lambda t: (df[t], t))
+    return " & ".join(present[:n]) if len(present) >= n else None
+
+
+@dataclass(frozen=True)
+class TermStats:
+    units: int
+    df: dict[str, int]
+    """Units whose lexical view contains each term."""
+
+    def common(self, terms: Iterable[str], max_df: float) -> set[str]:
+        limit = max_df * self.units
+        return {t for t in terms if self.df.get(t, 0) > limit}
+
+
+def stats_version(conn: psycopg.Connection, repo: str | None) -> tuple[int, str]:
+    """Changes whenever units in ``repo`` are added, removed or rewritten."""
+    row = conn.execute(
+        "SELECT count(*), coalesce(max(updated_at)::text, '') FROM units "
+        "WHERE %(repo)s::text IS NULL OR repo = %(repo)s",
+        {"repo": repo},
+    ).fetchone()
+    return (int(row[0]), str(row[1])) if row else (0, "")
+
+
+def term_stats(conn: psycopg.Connection, repo: str | None) -> TermStats:
+    """Document frequency of every lexical term in ``repo`` (all units for ``None``)."""
+    inner: sql.Composable = sql.SQL("SELECT lexical FROM units")
+    if repo is not None:
+        inner = sql.SQL("SELECT lexical FROM units WHERE repo = {}").format(sql.Literal(repo))
+    q = sql.SQL("SELECT word, ndoc FROM ts_stat({})").format(sql.Literal(inner.as_string(conn)))
+    df = {str(w): int(n) for w, n in conn.execute(q).fetchall()}
+    units = stats_version(conn, repo)[0]
+    return TermStats(units=units, df=df)
+
+
+# Identifier-looking tokens: dotted paths, snake_case, camelCase, ALL_CAPS (but not
+# short acronyms), names with digits, anything in backticks, and capitalized words that
+# do not start a sentence.
+_IDENT_TOKEN = re.compile(r"`([^`]+)`|([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)")
+_SENTENCE_END = re.compile(r"[.!?:]\s*$")
+
+
+def identifiers(text: str) -> list[str]:
+    """Names in ``text`` that look like code, in order, deduplicated."""
+    out: dict[str, None] = {}
+    for m in _IDENT_TOKEN.finditer(text):
+        quoted, tok = m.group(1), m.group(2)
+        if quoted:
+            for t in _IDENT_TOKEN.finditer(quoted):
+                if t.group(2) and len(t.group(2)) >= 2:
+                    out.setdefault(t.group(2).strip("."))
+            continue
+        tok = tok.strip(".")
+        if len(tok) < 3:
+            continue
+        before = text[: m.start()]
+        starts_sentence = not before.strip() or bool(_SENTENCE_END.search(before))
+        if (
+            "_" in tok.strip("_")
+            or "." in tok
+            or re.search(r"[a-z][A-Z]", tok)
+            or re.search(r"[A-Za-z]\d", tok)
+            or (tok.isupper() and len(tok) >= 5)  # not API, TTL, SQL
+            or (tok[0].isupper() and len(tok) >= 4 and not starts_sentence)
+        ):
+            out.setdefault(tok)
+    return list(out)
+
+
+def identifier_words(names: Iterable[str]) -> list[str]:
+    """The split parts of ``names`` (``TokenBucket.take`` -> token, bucket, take)."""
+    words: dict[str, None] = {}
+    for name in names:
+        for part in re.split(r"[._]+", name):
+            for p in _CAMEL.findall(part):
+                words.setdefault(p.lower())
+    return list(words)
+
+
+def symbol_hits(
+    conn: psycopg.Connection, names: Sequence[str], filters: Filters, k: int
+) -> list[tuple[str, float]]:
+    """Units that define or use the identifiers in ``names``, best first, with a score.
+
+    A unit whose qualified name is the identifier (or ends with ``.identifier``) defines
+    it (weight 3), one with ``identifier = ...`` at the start of a line assigns it (2),
+    and one whose text has it as a whole word uses it (1). Each match is divided by
+    ln(2 + number of units matching that identifier), so a rare name counts for more
+    than one used everywhere; ties go to the smaller unit.
+    """
+    if not names:
+        return []
+    lowered = [n.lower() for n in names]
+    leaf = [re.escape(n.rsplit(".", 1)[-1]) for n in names]
+    where, params = filters.where()
+    q = sql.SQL(
+        r"""
+        WITH q(lname, word) AS (
+            SELECT * FROM unnest(%(lnames)s::text[], %(words)s::text[])
+        ),
+        m AS (
+            SELECT u.id, u.tokens, q.lname,
+                CASE
+                    WHEN lower(u.qualified_name) = q.lname
+                        OR lower(u.qualified_name) LIKE ('%%.' || q.lname) THEN 3.0
+                    WHEN u.text ~ ('(^|\n)[ \t]*' || q.word || '[ \t]*(:[^\n=]*)?=($|[^=])')
+                        THEN 2.0
+                    ELSE 1.0
+                END AS w
+            FROM units u JOIN q ON (
+                lower(u.qualified_name) = q.lname
+                OR lower(u.qualified_name) LIKE ('%%.' || q.lname)
+                OR u.text ~ ('\m' || q.word || '\M')
+            )
+            WHERE {where}
+        ),
+        s AS (
+            SELECT id, tokens, w / ln(2 + count(*) OVER (PARTITION BY lname)) AS sc FROM m
+        )
+        SELECT id, sum(sc) AS score FROM s
+        GROUP BY id, tokens
+        ORDER BY score DESC, tokens, id
+        LIMIT %(k)s
+        """
+    ).format(where=where)
+    params.update(lnames=lowered, words=leaf, k=k)
+    return [(r[0], float(r[1])) for r in conn.execute(q, params).fetchall()]
 
 
 # ``lexical`` mixes a 'simple' part (identifiers) and an 'english' part (summary),
@@ -182,7 +323,7 @@ def vector_hits(
 
 
 def lexical_hits(conn: psycopg.Connection, tsq: str | None, filters: Filters, k: int) -> list[str]:
-    """Top-k unit ids by ``ts_rank_cd`` on the lexical view."""
+    """Top-k unit ids by ``ts_rank_cd`` on the lexical view for the ``tsquery`` ``tsq``."""
     if tsq is None:
         return []
     where, params = filters.where()
@@ -204,22 +345,27 @@ class CandidateRow:
 
     unit: Unit
     lexical: float
-    summary_vec: Vector | None
-    code_vec: Vector | None
+    semantic: float | None = None
+    """cos(q, s_u), or ``None`` without a summary vector for the query's model."""
+    code: float | None = None
+    """cos(q, c_u), or ``None`` without a code vector for the query's model."""
 
 
 def load_candidates(
     conn: psycopg.Connection,
     ids: Sequence[str],
     *,
-    summary_model: str | None,
-    code_model: str | None,
+    summary: tuple[str, Vector] | None,
+    code: tuple[str, Vector] | None,
     tsq: str | None,
     filters: Filters,
 ) -> dict[str, CandidateRow]:
-    """Load units with their vectors for the query's models and their raw lexical rank.
+    """Load units with their cosine to the query on each view and their raw lexical rank.
 
-    Units failing ``filters`` are dropped, which matters for graph-expanded ids.
+    ``summary`` and ``code`` are ``(model, query vector)``. The cosines are computed in
+    the database, so no candidate vector is sent back (a 4096-dim vector is ~40 kB of
+    text per unit and view). Units failing ``filters`` are dropped, which matters for
+    graph-expanded ids.
     """
     if not ids:
         return {}
@@ -227,33 +373,40 @@ def load_candidates(
     lex = sql.SQL("coalesce(ts_rank_cd(u.lexical, {}), 0)").format(sql.SQL(_TSQUERY))
     q = sql.SQL(
         """
-        SELECT {cols}, sv.embedding AS s_emb, cv.embedding AS c_emb, {lex} AS lex
+        SELECT {cols}, 1 - (sv.embedding <=> %(sq)s) AS s_cos,
+            1 - (cv.embedding <=> %(cq)s) AS c_cos, {lex} AS lex
         FROM units u
-        LEFT JOIN unit_vectors sv
-            ON sv.unit_id = u.id AND sv.view = 'summary' AND sv.model = %(s_model)s
-        LEFT JOIN unit_vectors cv
-            ON cv.unit_id = u.id AND cv.view = 'code' AND cv.model = %(c_model)s
+        LEFT JOIN unit_vectors sv ON sv.unit_id = u.id AND sv.view = 'summary'
+            AND sv.model = %(s_model)s AND sv.dim = %(s_dim)s
+        LEFT JOIN unit_vectors cv ON cv.unit_id = u.id AND cv.view = 'code'
+            AND cv.model = %(c_model)s AND cv.dim = %(c_dim)s
         WHERE u.id = ANY(%(ids)s) AND {where}
         """
     ).format(cols=sql.SQL(unit_columns("u")), lex=lex, where=where)
-    params.update(ids=list(ids), s_model=summary_model, c_model=code_model, tsq=tsq)
+    # A view without a query vector joins nothing (model NULL) and gets no cosine.
+    for key, view in (("s", summary), ("c", code)):
+        model, vec = view if view is not None else (None, None)
+        params[f"{key}_model"] = model
+        params[f"{key}_dim"] = int(vec.shape[0]) if vec is not None else None
+        params[f"{key}q"] = vec if vec is not None else np.zeros(1, dtype=np.float32)
+    params.update(ids=list(ids), tsq=tsq)
     out: dict[str, CandidateRow] = {}
     with conn.cursor(row_factory=dict_row) as cur:
         for row in cur.execute(q, params).fetchall():
-            s_emb, c_emb, lex_rank = row.pop("s_emb"), row.pop("c_emb"), row.pop("lex")
+            s_cos, c_cos, lex_rank = row.pop("s_cos"), row.pop("c_cos"), row.pop("lex")
             unit = row_to_unit(row)
             out[unit.id] = CandidateRow(
                 unit=unit,
                 lexical=float(lex_rank),
-                summary_vec=_as_vec(s_emb),
-                code_vec=_as_vec(c_emb),
+                semantic=_finite(s_cos),
+                code=_finite(c_cos),
             )
     return out
 
 
-def _as_vec(emb: Any) -> Vector | None:
-    if emb is None:
+def _finite(x: Any) -> float | None:
+    """A cosine from pgvector, or ``None`` when there was no vector (or it was zero)."""
+    if x is None:
         return None
-    # pgvector >= 0.4 returns ``Vector``; older versions return an ndarray.
-    arr = emb.to_numpy() if hasattr(emb, "to_numpy") else emb
-    return np.asarray(arr, dtype=np.float32)
+    v = float(x)
+    return v if math.isfinite(v) else 0.0

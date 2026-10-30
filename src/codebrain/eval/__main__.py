@@ -12,6 +12,7 @@ import random
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -272,7 +273,7 @@ async def cmd_qa(args: argparse.Namespace, out: Path, llm: LLM) -> dict[str, Any
     files = qa.codebase_files(root)
     codebase = qa.render_codebase(files)
     codebase_tokens = llm.count_tokens(codebase)
-    if codebase_tokens + args.qa_max_tokens + 1000 > args.max_context:
+    if not args.qa_recall_only and codebase_tokens + args.qa_max_tokens + 1000 > args.max_context:
         raise SystemExit(
             f"{root.name} is {codebase_tokens:,} tokens, too big for --max-context "
             f"{args.max_context:,} in normal mode"
@@ -300,21 +301,42 @@ async def cmd_qa(args: argparse.Namespace, out: Path, llm: LLM) -> dict[str, Any
         args.database_url, root, repo, qa.QueryEmbedder(inner, query=False), summarizer
     )
     log(f"qa: ingest took {stats.seconds:.1f}s, {stats.units} units")
+    if args.qa_query_instruction != "none" and hasattr(inner, "query_instruction"):
+        inner.query_instruction = args.qa_query_instruction
+    reranker = None
+    if args.qa_rerank and not args.fake:
+        reranker = qa.LLMReranker(
+            args.llm_model, args.llm_base_url, disable_thinking=not args.allow_thinking
+        )
     recall = qa.StoreRecall(
         args.database_url,
         repo,
         qa.QueryEmbedder(inner, query=True),
         args.qa_budget,
         args.qa_k,
+        reranker=reranker,
     )
 
-    def whole_codebase(_: str) -> tuple[str, list[str]]:
-        return codebase, []
+    def whole_codebase(_: str) -> qa.Context:
+        return qa.Context(codebase)
 
     # Timed: answering only, one question at a time.
     answers: list[qa.Answer] = []
+    modes: tuple[tuple[str, Callable[[str], qa.Context]], ...] = (
+        ("normal", whole_codebase),
+        ("codebrain", recall),
+    )
     try:
-        for mode, context_for in (("normal", whole_codebase), ("codebrain", recall)):
+        if args.qa_recall_only:
+            modes = ()
+            for q in questions:
+                a = qa.probe(q, recall, llm.count_tokens)
+                answers.append(a)
+                log(
+                    f"qa recall {q.id}: gold {len(a.files_hit)}/{len(a.expected_files)}, facts "
+                    f"{a.context_facts}/{a.facts_total}, {a.recall_seconds * 1000:.0f} ms"
+                )
+        for mode, context_for in modes:
             for q in questions:
                 a = await qa.ask(
                     llm,
@@ -335,7 +357,7 @@ async def cmd_qa(args: argparse.Namespace, out: Path, llm: LLM) -> dict[str, Any
     del inner
     free_gpu()
 
-    if not args.fake and not args.no_judge:
+    if not args.fake and not args.no_judge and not args.qa_recall_only:
         by_id = {q.id: q for q in questions}
         verdicts = await asyncio.gather(*(qa.judge(llm, by_id[a.question_id], a) for a in answers))
         for a, v in zip(answers, verdicts, strict=True):
@@ -351,6 +373,9 @@ async def cmd_qa(args: argparse.Namespace, out: Path, llm: LLM) -> dict[str, Any
         "budget": args.qa_budget,
         "k": args.qa_k,
         "warm_cache": args.qa_warm_cache,
+        "recall_only": args.qa_recall_only,
+        "rerank": bool(reranker),
+        "rerank_prompt_tokens": reranker.prompt_tokens if reranker else 0,
         "questions": [q.id for q in questions],
         "packages": {q.id: q.package or name for q in questions},
         "ingest": dataclasses.asdict(stats),
@@ -421,7 +446,8 @@ def render(meta: dict[str, Any], res: dict[str, Any]) -> str:
                 lines.append(f"| {label} | " + " | ".join(cells) + " |")
         lines.append("")
     if res.get("qa"):
-        lines += qa.render_section(res["qa"])
+        render = qa.render_probe_section if res["qa"].get("recall_only") else qa.render_section
+        lines += render(res["qa"])
     return "\n".join(lines)
 
 
@@ -476,6 +502,22 @@ def parser() -> argparse.ArgumentParser:
     g.add_argument("--qa-summarizer", choices=["llm", "heuristic"], default="llm")
     g.add_argument("--qa-warm-cache", action="store_true", help="let the prefix cache be reused")
     g.add_argument("--no-judge", action="store_true")
+    g.add_argument(
+        "--qa-rerank",
+        action="store_true",
+        help="let the served LLM pick among the top recall candidates (one extra call each)",
+    )
+    g.add_argument(
+        "--qa-query-instruction",
+        default=qa.QUERY_INSTRUCTION,
+        help="query instruction for embedders that take one (Qwen3-Embedding); 'none' keeps "
+        "the model's own",
+    )
+    g.add_argument(
+        "--qa-recall-only",
+        action="store_true",
+        help="ingest and recall only: report gold-file hits and facts in context, no answers",
+    )
     g.add_argument("--database-url", default=None, help="default CODEBRAIN_DATABASE_URL")
     return ap
 

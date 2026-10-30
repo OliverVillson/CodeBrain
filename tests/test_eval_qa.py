@@ -152,3 +152,50 @@ def test_store_recall_holds_no_open_transaction(database_url: str) -> None:
         assert recall.conn.info.transaction_status is psycopg.pq.TransactionStatus.IDLE
     finally:
         recall.close()
+
+
+def test_every_question_names_its_gold_files() -> None:
+    files = dict(qa.codebase_files(qa.DEFAULT_CODEBASE))
+    for q in qa.load_questions(qa.DEFAULT_QUESTIONS):
+        assert q.files, q.id
+        if q.package is None:
+            assert all(f in files for f in q.files), q.id
+        else:
+            assert all(f.startswith(f"libs/{q.package}/") for f in q.files), q.id
+
+
+def test_gold_hits_and_facts_in_context() -> None:
+    q = qa.load_questions(qa.DEFAULT_QUESTIONS)[0]  # retry.py and config.py
+    ctx = qa.Context(
+        "backoff_cap = 900.0  # uniform(base, 3 * prev), decorrelated jitter, 2 s base",
+        recalled=["tidepool/retry.py:1-80@full"],
+        files={"tidepool/retry.py": "full", "tidepool/webhooks.py": "summary"},
+    )
+    assert qa.gold_hits(q, ctx.files) == {"tidepool/retry.py": "full"}
+    a = qa.probe(q, lambda _: ctx, lambda t: len(t) // 4)
+    assert a.files_hit == {"tidepool/retry.py": "full"} and a.expected_files == list(q.files)
+    assert a.context_facts == len(q.facts) and a.answer == "" and a.prompt_tokens == 0
+
+
+@pytest.mark.db
+def test_recall_only_run_reports_gold_files(database_url: str, tmp_path: Path) -> None:
+    args = parser().parse_args(
+        ["qa", "--fake", "--qa-recall-only", "--out", str(tmp_path), "--database-url", database_url]
+    )
+    try:
+        assert asyncio.run(amain(args)) == 0
+    finally:
+        with psycopg.connect(database_url, autocommit=True) as conn:
+            conn.execute("DELETE FROM units WHERE repo = 'qa-fixture/tidepool'")
+    [run] = list(tmp_path.iterdir())
+    res = json.loads((run / "results.json").read_text())["qa"]
+    s = res["summary"]["codebrain"]
+    assert (
+        res["recall_only"] and s["questions"] == 40 and res["summary"]["normal"]["questions"] == 0
+    )
+    assert 0 < s["gold_files_hit"] <= s["gold_files"] and 0 < s["context_facts"] <= s["facts_total"]
+    assert {"embed", "search_lexical", "pack"} <= set(s["mean_stage_seconds"])
+    report = (run / "report.md").read_text()
+    assert "CodeBrain recall only" in report and "gold files recalled" in report
+    answers = [json.loads(line) for line in (run / "qa-answers.jsonl").open()]
+    assert all(a["mode"] == "codebrain" and a["recall_timings"] for a in answers)

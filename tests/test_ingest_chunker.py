@@ -147,11 +147,43 @@ def test_small_adjacent_functions_merge() -> None:
     )
     pf = Chunker(tau_min=20, tau_max=1200).chunk_code("m.py", src.encode(), PYTHON)
     names = [c.qualified_name for c in pf.chunks]
-    assert names == ["m.py", "a..c", "d..e"]
+    assert names == ["m.py", "m.py#body", "a..c", "d..e"]
     abc = by_name(pf)["a..c"]
     assert abc.aliases == ["a", "b", "c"]
     assert abc.labels == {"merged": ["a", "b", "c"]}
     assert "X =" not in abc.text  # never merges across real code
+
+
+def test_module_body_holds_loose_statements() -> None:
+    src = textwrap.dedent(
+        """\
+        \"\"\"Retry settings.\"\"\"
+        import random
+        from x import y
+
+        DEFAULT_TTL = 300
+        RETRY_DELAYS = (1, 5, 30)
+
+
+        def backoff(n):
+            return RETRY_DELAYS[min(n, 2)] * random.random()
+
+
+        REGISTRY: dict[str, int] = {}
+        """
+    )
+    pf = Chunker(tau_min=5, tau_max=1200).chunk_code("m.py", src.encode(), PYTHON)
+    body = by_name(pf)["m.py#body"]
+    assert body.kind is UnitKind.MODULE and body.parent == "m.py" and body.labels == {"body": True}
+    assert "DEFAULT_TTL = 300" in body.text and "REGISTRY" in body.text
+    assert "import" not in body.text and "def backoff" not in body.text
+    assert body.text.count("...") == 2  # the imports and the function are elided
+    assert body.nodes == []  # calls stay with the module
+
+    # Nothing but imports and a docstring: no body unit.
+    bare = '"""Doc."""\nimport os\n\n\ndef f():\n    return os.sep\n'
+    names = [c.qualified_name for c in Chunker().chunk_code("b.py", bare.encode(), PYTHON).chunks]
+    assert names == ["b.py", "f"]
 
 
 def test_duplicate_names_get_suffix() -> None:

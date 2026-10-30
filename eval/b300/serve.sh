@@ -13,7 +13,9 @@ case "$MODEL" in
   *Qwen3.8*) EXTRA+=(--limit-mm-per-prompt '{"image": 0, "video": 0}') ;;
 esac
 # Anything in VLLM_ARGS is passed through, e.g. VLLM_ARGS="--kv-cache-dtype fp8".
-read -r -a USER_ARGS <<<"${VLLM_ARGS:-}"
+# Unset, it is --enforce-eager: CUDA graph capture has failed on the B300 and every
+# benchmark run so far used eager mode. VLLM_ARGS="" turns it off.
+read -r -a USER_ARGS <<<"${VLLM_ARGS---enforce-eager}"
 
 # vLLM JIT-compiles some kernels at runtime with ninja (and nvcc), which it looks up on PATH.
 export PATH="$PWD/.venv-eval/bin:$PATH"

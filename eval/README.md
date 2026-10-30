@@ -26,11 +26,23 @@ in the same table.
 
 ## Run it
 
+On a fresh Ubuntu 24.04 VM with the NVIDIA driver installed, as your own user (not
+root, not sudo):
+
 ```sh
 git clone https://github.com/OliverVillson/CodeBrain && cd CodeBrain
-eval/b300/setup.sh                 # uv venv + vLLM + sentence-transformers, checks the GPU arch
-EXTRA_REPO=https://github.com/you/your-repo eval/b300/run.sh
+eval/b300/setup.sh                 # apt packages, uv venv + vLLM + sentence-transformers, GPU check
+tmux new -s eval                   # an SSH drop kills anything outside tmux
+eval/b300/qa.sh --qa-budget 8000   # codebase Q&A only, about an hour
+EXTRA_REPO=https://github.com/you/your-repo eval/b300/run.sh   # or everything
 ```
+
+`setup.sh` installs what earlier runs were missing (Python headers, gcc, docker with
+compose, tmux) with sudo, and stops if the checkout has files owned by someone else
+(left by an earlier `sudo` run; it prints the `chown` to fix it). Docker runs through
+sudo when you are not in the docker group. vLLM runs with `--enforce-eager` unless you
+set `VLLM_ARGS` (CUDA graph capture has failed on the B300). Detach from tmux with
+`Ctrl-b d` and come back with `tmux attach -t eval`.
 
 `run.sh` starts Postgres (`db.sh`, via `docker compose`) and vLLM if they are not
 already up, then runs everything. `eval/b300/qa.sh` runs only the codebase Q&A
@@ -118,9 +130,30 @@ regexes per fact). The same model then grades each answer against the reference 
 CORRECT, PARTIAL or INCORRECT (`--no-judge` skips that); judge calls are not counted in
 either mode's tokens or time.
 
-Useful flags: `--qa-budget 8000`, `--qa-summarizer heuristic` (docstring summaries,
-faster ingest), `--qa-codebase PATH --qa-questions FILE` for your own codebase and
-questions, `--database-url`.
+Each question also lists its **gold files** (`files` in the questions file: where the
+reference answer's facts are). They never affect grading; they say why an answer was
+missed. The report adds, for CodeBrain, how many gold files recall returned (and how
+many as full code), and for both modes how many required facts already match the
+context ("facts visible in context"). A fact in the context but not in the answer is a
+reading miss; one missing from the context is a recall miss. Recall's time per stage
+(embedding, each index, graph, load, score, MMR, pack) is in the report and in
+`qa-answers.jsonl`.
+
+`--qa-recall-only` ingests and recalls but asks nothing: it reports gold files, facts in
+context, context tokens and recall time per question in seconds, so ranking and packing
+changes can be compared without a full run (`--fake` does it on a laptop with hashed
+vectors and docstring summaries; those numbers only compare configurations with each
+other). Recall settings are environment variables, for example
+`CODEBRAIN_RETRIEVAL__MIN_RELATIVE_SCORE=0.4`.
+
+Useful flags: `--qa-budget 8000`, `--qa-k N` (pack only the top N recall results; it
+also turns off the one-line signatures recall adds for what did not fit),
+`--qa-rerank` (the served model picks among the top 30 recall candidates, one short
+extra call per question, counted in `rerank_prompt_tokens`), `--qa-query-instruction`
+(Qwen3-Embedding's query instruction; the default asks for code that answers a question
+about a codebase, `none` keeps the model's web-search one), `--qa-summarizer heuristic`
+(docstring summaries, faster ingest), `--qa-codebase PATH --qa-questions FILE` for your
+own codebase and questions, `--database-url`.
 
 ## Useful flags
 
