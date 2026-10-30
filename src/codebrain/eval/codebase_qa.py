@@ -73,6 +73,9 @@ class Question:
     facts: tuple[Fact, ...]
     package: str | None = None
     """A haystack library the question is about; ``None`` means the codebase itself."""
+    files: tuple[str, ...] = ()
+    """Gold files: where the facts of the reference answer are. Only used to diagnose
+    misses (was the code recalled, and at which resolution), never to grade."""
 
 
 def load_questions(path: Path) -> list[Question]:
@@ -84,6 +87,7 @@ def load_questions(path: Path) -> list[Question]:
             answer=q["answer"],
             facts=tuple(Fact(f["label"], tuple(f["any"])) for f in q["facts"]),
             package=q.get("package"),
+            files=tuple(q.get("files", ())),
         )
         for q in data["questions"]
     ]
@@ -92,6 +96,27 @@ def load_questions(path: Path) -> list[Question]:
 def grade(answer: str, q: Question) -> list[str]:
     """Labels of the required facts the answer is missing."""
     return [f.label for f in q.facts if not f.found_in(answer)]
+
+
+RESOLUTION_ORDER = ("signature", "summary", "full")
+
+
+@dataclass
+class Context:
+    """What one mode puts in front of the model for one question."""
+
+    text: str
+    recalled: list[str] = field(default_factory=list)
+    """Citations ``path:lines@resolution`` of the recalled units (CodeBrain only)."""
+    files: dict[str, str] = field(default_factory=dict)
+    """Each recalled file and the best resolution any of its units came back at."""
+    timings: dict[str, float] = field(default_factory=dict)
+    """Seconds per recall stage."""
+
+
+def gold_hits(q: Question, files: dict[str, str]) -> dict[str, str]:
+    """``{gold file: best resolution recalled}`` for the gold files that came back."""
+    return {f: files[f] for f in q.files if f in files}
 
 
 def codebase_files(root: Path) -> list[tuple[str, str]]:
@@ -198,6 +223,13 @@ class Answer:
     judge: str | None = None
     recalled: list[str] = field(default_factory=list)
     """Citations of the units recall returned (CodeBrain only)."""
+    expected_files: list[str] = field(default_factory=list)
+    files_hit: dict[str, str] = field(default_factory=dict)
+    """Gold files recall returned, with the best resolution of each (CodeBrain only)."""
+    context_facts: int = 0
+    """Required facts whose pattern already matches the context. A fact the context
+    shows but the answer lacks is a reading miss; one the context lacks is a recall miss."""
+    recall_timings: dict[str, float] = field(default_factory=dict)
 
     @property
     def correct(self) -> bool:
@@ -208,7 +240,7 @@ async def ask(
     llm: LLM,
     q: Question,
     mode: str,
-    context_for: Callable[[str], tuple[str, list[str]]],
+    context_for: Callable[[str], Context],
     count_tokens: Callable[[str], int],
     *,
     max_tokens: int,
@@ -216,9 +248,9 @@ async def ask(
 ) -> Answer:
     system = ANSWER_SYSTEM if warm_cache else f"[request {uuid.uuid4().hex}]\n{ANSWER_SYSTEM}"
     t0 = time.perf_counter()
-    context, recalled = context_for(q.question)
+    ctx = context_for(q.question)
     t1 = time.perf_counter()
-    c: Completion = await llm.chat(system, user_prompt(context, q.question), max_tokens)
+    c: Completion = await llm.chat(system, user_prompt(ctx.text, q.question), max_tokens)
     t2 = time.perf_counter()
     return Answer(
         question_id=q.id,
@@ -227,12 +259,43 @@ async def ask(
         seconds=t2 - t0,
         recall_seconds=t1 - t0,
         llm_seconds=t2 - t1,
-        context_tokens=count_tokens(context),
+        context_tokens=count_tokens(ctx.text),
         prompt_tokens=c.prompt_tokens,
         completion_tokens=c.completion_tokens,
         missing=grade(c.text, q),
         facts_total=len(q.facts),
-        recalled=recalled,
+        recalled=ctx.recalled,
+        expected_files=list(q.files),
+        files_hit=gold_hits(q, ctx.files) if ctx.recalled else {},
+        context_facts=len(q.facts) - len(grade(ctx.text, q)),
+        recall_timings=ctx.timings,
+    )
+
+
+def probe(
+    q: Question, context_for: Callable[[str], Context], count_tokens: Callable[[str], int]
+) -> Answer:
+    """Recall only, no LLM call: what the model would have been shown."""
+    t0 = time.perf_counter()
+    ctx = context_for(q.question)
+    secs = time.perf_counter() - t0
+    return Answer(
+        question_id=q.id,
+        mode="codebrain",
+        answer="",
+        seconds=secs,
+        recall_seconds=secs,
+        llm_seconds=0.0,
+        context_tokens=count_tokens(ctx.text),
+        prompt_tokens=0,
+        completion_tokens=0,
+        missing=[f.label for f in q.facts],
+        facts_total=len(q.facts),
+        recalled=ctx.recalled,
+        expected_files=list(q.files),
+        files_hit=gold_hits(q, ctx.files),
+        context_facts=len(q.facts) - len(grade(ctx.text, q)),
+        recall_timings=ctx.timings,
     )
 
 
@@ -250,6 +313,11 @@ def summarize(answers: Sequence[Answer], mode: str) -> dict[str, Any]:
     rows = [a for a in answers if a.mode == mode]
     n = len(rows) or 1
     judged = [a for a in rows if a.judge is not None]
+    gold = [a for a in rows if a.expected_files]
+    stages: dict[str, float] = {}
+    for a in rows:
+        for k, v in a.recall_timings.items():
+            stages[k] = stages.get(k, 0.0) + v
     return {
         "questions": len(rows),
         "correct": sum(a.correct for a in rows),
@@ -265,6 +333,12 @@ def summarize(answers: Sequence[Answer], mode: str) -> dict[str, Any]:
         "completion_tokens": sum(a.completion_tokens for a in rows),
         "total_tokens": sum(a.prompt_tokens + a.completion_tokens for a in rows),
         "mean_context_tokens": sum(a.context_tokens for a in rows) / n,
+        "context_facts": sum(a.context_facts for a in rows),
+        "gold_files": sum(len(a.expected_files) for a in gold),
+        "gold_files_hit": sum(len(a.files_hit) for a in gold),
+        "gold_files_full": sum(sum(r == "full" for r in a.files_hit.values()) for a in gold),
+        "gold_questions_all_hit": sum(len(a.files_hit) == len(a.expected_files) for a in gold),
+        "mean_stage_seconds": {k: v / n for k, v in stages.items()},
     }
 
 
@@ -290,6 +364,61 @@ class QueryEmbedder:
 
     def embed(self, texts: Sequence[str]) -> list[list[float]]:
         return [list(map(float, v)) for v in self.inner.embed(list(texts), query=self.query)]
+
+
+QUERY_INSTRUCTION = (
+    "Given a question about a codebase, retrieve the code and code summaries that answer it"
+)
+"""Query instruction for embedders that take one (Qwen3-Embedding), instead of their
+default web-search one."""
+
+RERANK_SYSTEM = """\
+You pick the code snippets needed to answer a question about a codebase. Each snippet \
+has a number, a file path and a summary. Reply with the numbers of the snippets that \
+hold the answer or part of it, most useful first, separated by commas, at most 8. Reply \
+"none" if none of them helps."""
+
+
+class LLMReranker:
+    """``Reranker`` for recall: one listwise call to the served model per question."""
+
+    def __init__(self, model: str, base_url: str, *, disable_thinking: bool) -> None:
+        from openai import OpenAI
+
+        self.client = OpenAI(base_url=base_url, api_key="EMPTY", timeout=120)
+        self.model = model
+        self.extra = (
+            {"chat_template_kwargs": {"enable_thinking": False}} if disable_thinking else {}
+        )
+        self.prompt_tokens = 0
+
+    def rerank(self, query: str, candidates: Sequence[tuple[str, str]]) -> list[str]:
+        listing = "\n\n".join(f"[{i}] {text}" for i, (_, text) in enumerate(candidates, 1))
+        r = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": RERANK_SYSTEM},
+                {"role": "user", "content": f"{listing}\n\nQuestion: {query}"},
+            ],
+            max_tokens=40,
+            temperature=0.0,
+            extra_body=self.extra,
+        )
+        if r.usage is not None:
+            self.prompt_tokens += r.usage.prompt_tokens
+        from codebrain.eval.backends import _THINK
+
+        return parse_picks(_THINK.sub("", r.choices[0].message.content or ""), candidates)
+
+
+def parse_picks(reply: str, candidates: Sequence[tuple[str, str]]) -> list[str]:
+    """Unit ids for the 1-based numbers in ``reply``, in order, deduplicated."""
+    out: dict[str, None] = {}
+    for n in re.findall(r"\d+", reply):
+        i = int(n)
+        if 1 <= i <= len(candidates):
+            out.setdefault(candidates[i - 1][0])
+    return list(out)
 
 
 def openai_summarizer(
@@ -375,6 +504,7 @@ class StoreRecall:
         encoder: QueryEmbedder,
         budget: int,
         k: int | None = None,
+        reranker: Any = None,
     ) -> None:
         from codebrain.models import VectorView
         from codebrain.retrieval import ContextBroker
@@ -385,17 +515,31 @@ class StoreRecall:
         # benchmark from holding one transaction open for the whole run.
         self.conn = connect(database_url, autocommit=True)
         self.broker = ContextBroker(
-            self.conn, {VectorView.SUMMARY: encoder, VectorView.CODE: encoder}
+            self.conn, {VectorView.SUMMARY: encoder, VectorView.CODE: encoder}, reranker=reranker
         )
         self.filters = Filters(repo=repo)
         self.budget = budget
         self.k = k
 
-    def __call__(self, question: str) -> tuple[str, list[str]]:
+    def __call__(self, question: str) -> Context:
         result = self.broker.recall(
             question, self.budget, k=self.k, filters=self.filters, log=False
         )
-        return result.render(), [f"{u.citation}@{u.resolution}" for u in result.units]
+        files: dict[str, str] = {}
+        for u in result.units:
+            path, res = u.unit.path, str(u.resolution)
+            if path and RESOLUTION_ORDER.index(res) > RESOLUTION_ORDER.index(
+                files.get(path, "signature")
+            ):
+                files[path] = res
+            elif path:
+                files.setdefault(path, res)
+        return Context(
+            text=result.render(),
+            recalled=[f"{u.citation}@{u.resolution}" for u in result.units],
+            files=files,
+            timings=result.timings,
+        )
 
     def close(self) -> None:
         self.conn.close()
@@ -451,7 +595,12 @@ def render_section(r: dict[str, Any]) -> list[str]:
         f"| completion tokens | {pair('completion_tokens', lambda x: f'{x:,}')} |",
         f"| total tokens | {pair('total_tokens', lambda x: f'{x:,}')} |",
         f"| mean context tokens | {pair('mean_context_tokens', lambda x: f'{x:,.0f}')} |",
+        "| facts visible in context | "
+        + " | ".join(frac(m, "context_facts", "facts_total") for m in MODES)
+        + " |",
+        *gold_rows(s["codebrain"]),
         "",
+        *stage_lines(s["codebrain"]),
     ]
     packages = r.get("packages", {})
     if len(set(packages.values())) > 1:
@@ -471,8 +620,8 @@ def render_section(r: dict[str, Any]) -> list[str]:
         lines.append("")
     lines += [
         "| question | normal | codebrain | normal s | codebrain s (recall) | normal tokens "
-        "| codebrain tokens |",
-        "| --- | --- | --- | --- | --- | --- | --- |",
+        "| codebrain tokens | gold files (full) | facts in context |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     by = {(a["question_id"], a["mode"]): a for a in r["answers"]}
 
@@ -490,7 +639,91 @@ def render_section(r: dict[str, Any]) -> list[str]:
             f"| {qid} | {verdict(n)} | {verdict(c)} | {n['seconds']:.2f} "
             f"| {c['seconds']:.2f} ({c['recall_seconds'] * 1000:.0f} ms) "
             f"| {n['prompt_tokens'] + n['completion_tokens']:,} "
-            f"| {c['prompt_tokens'] + c['completion_tokens']:,} |"
+            f"| {c['prompt_tokens'] + c['completion_tokens']:,} | {gold_cell(c)} "
+            f"| {c.get('context_facts', 0)}/{c['facts_total']} |"
         )
     lines += ["", "Answers, missing facts and recalled units are in `qa-answers.jsonl`.", ""]
+    return lines
+
+
+def gold_rows(s: dict[str, Any]) -> list[str]:
+    if not s.get("gold_files"):
+        return []
+    return [
+        f"| gold files recalled (as full code) | – | {s['gold_files_hit']}/{s['gold_files']} "
+        f"({s['gold_files_full']}) |",
+        f"| questions with every gold file recalled | – | {s['gold_questions_all_hit']}"
+        f"/{s['questions']} |",
+    ]
+
+
+def stage_lines(s: dict[str, Any]) -> list[str]:
+    stages = s.get("mean_stage_seconds") or {}
+    if not stages:
+        return []
+    parts = ", ".join(f"{k} {v * 1000:.0f}" for k, v in stages.items())
+    return [f"Recall stages, mean ms per question: {parts}.", ""]
+
+
+def gold_cell(a: dict[str, Any]) -> str:
+    expected = a.get("expected_files") or []
+    if not expected:
+        return "–"
+    hit = a.get("files_hit") or {}
+    full = sum(r == "full" for r in hit.values())
+    return f"{len(hit)}/{len(expected)} ({full})"
+
+
+def render_probe_section(r: dict[str, Any]) -> list[str]:
+    """Report for ``--qa-recall-only``: what recall would hand the model, no LLM calls."""
+    s = r["summary"]["codebrain"]
+    ing = r["ingest"]
+    lines = [
+        "## Codebase Q&A · CodeBrain recall only",
+        "",
+        f"Codebase `{r['codebase']}`: {r['files']} files, {r['codebase_tokens']:,} tokens. "
+        f"{len(r['questions'])} questions, recall budget {r['budget']:,} tokens"
+        + (f", top {r['k']} results" if r.get("k") else "")
+        + ". No answers are generated: this measures whether the code that answers each "
+        "question reached the context.",
+        "",
+        f"Ingest (not timed): {ing['seconds']:.1f}s, {ing['units']} units, "
+        f"{ing['summaries']} summaries ({ing['summarizer']}), `{ing['embedder']}`.",
+        "",
+        "| | codebrain |",
+        "| --- | --- |",
+        f"| facts visible in context | {s['context_facts']}/{s['facts_total']} |",
+        *(row.replace("| – ", "") for row in gold_rows(s)),
+        f"| mean context tokens | {s['mean_context_tokens']:,.0f} |",
+        f"| mean recall ms | {s['recall_seconds'] / max(s['questions'], 1) * 1000:.0f} |",
+        "",
+        *stage_lines(s),
+    ]
+    packages = r.get("packages", {})
+    by = {a["question_id"]: a for a in r["answers"]}
+    if len(set(packages.values())) > 1:
+        lines += [
+            "| package | questions | facts in context | gold files (full) |",
+            "| --- | --- | --- | --- |",
+        ]
+        for pkg in dict.fromkeys(packages.values()):
+            rows = [by[q] for q, p in packages.items() if p == pkg]
+            facts = sum(a["context_facts"] for a in rows)
+            total = sum(a["facts_total"] for a in rows)
+            hit = sum(len(a["files_hit"]) for a in rows)
+            full = sum(sum(v == "full" for v in a["files_hit"].values()) for a in rows)
+            gold = sum(len(a["expected_files"]) for a in rows)
+            lines.append(f"| {pkg} | {len(rows)} | {facts}/{total} | {hit}/{gold} ({full}) |")
+        lines.append("")
+    lines += [
+        "| question | gold files (full) | facts in context | context tokens | recall ms |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for qid in r["questions"]:
+        a = by[qid]
+        lines.append(
+            f"| {qid} | {gold_cell(a)} | {a['context_facts']}/{a['facts_total']} "
+            f"| {a['context_tokens']:,} | {a['recall_seconds'] * 1000:.0f} |"
+        )
+    lines += ["", "Recalled units per question are in `qa-answers.jsonl`.", ""]
     return lines

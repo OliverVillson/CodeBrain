@@ -75,10 +75,15 @@ class STEmbedder:
         self.model.max_seq_length = min(self.model.max_seq_length or max_seq_length, max_seq_length)
         prompts = getattr(self.model, "prompts", None) or {}
         self.query_prompt = "query" if "query" in prompts else None
+        self.query_instruction: str | None = None
+        """Replaces the text of the model's own query prompt (Qwen3-Embedding's is web
+        search); only used when the model has a query prompt to replace."""
 
     def embed(self, texts: Sequence[str], *, query: bool) -> Vectors:
         kwargs: dict[str, Any] = {"batch_size": self.batch_size, "normalize_embeddings": True}
-        if query and self.query_prompt:
+        if query and self.query_prompt and self.query_instruction:
+            kwargs["prompt"] = f"Instruct: {self.query_instruction}\nQuery:"
+        elif query and self.query_prompt:
             kwargs["prompt_name"] = self.query_prompt
         # Longest first keeps padding low inside each batch.
         order = sorted(range(len(texts)), key=lambda i: -len(texts[i]))

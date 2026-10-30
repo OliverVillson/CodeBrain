@@ -118,9 +118,30 @@ regexes per fact). The same model then grades each answer against the reference 
 CORRECT, PARTIAL or INCORRECT (`--no-judge` skips that); judge calls are not counted in
 either mode's tokens or time.
 
-Useful flags: `--qa-budget 8000`, `--qa-summarizer heuristic` (docstring summaries,
-faster ingest), `--qa-codebase PATH --qa-questions FILE` for your own codebase and
-questions, `--database-url`.
+Each question also lists its **gold files** (`files` in the questions file: where the
+reference answer's facts are). They never affect grading; they say why an answer was
+missed. The report adds, for CodeBrain, how many gold files recall returned (and how
+many as full code), and for both modes how many required facts already match the
+context ("facts visible in context"). A fact in the context but not in the answer is a
+reading miss; one missing from the context is a recall miss. Recall's time per stage
+(embedding, each index, graph, load, score, MMR, pack) is in the report and in
+`qa-answers.jsonl`.
+
+`--qa-recall-only` ingests and recalls but asks nothing: it reports gold files, facts in
+context, context tokens and recall time per question in seconds, so ranking and packing
+changes can be compared without a full run (`--fake` does it on a laptop with hashed
+vectors and docstring summaries; those numbers only compare configurations with each
+other). Recall settings are environment variables, for example
+`CODEBRAIN_RETRIEVAL__MIN_RELATIVE_SCORE=0.4`.
+
+Useful flags: `--qa-budget 8000`, `--qa-k N` (pack only the top N recall results; it
+also turns off the one-line signatures recall adds for what did not fit),
+`--qa-rerank` (the served model picks among the top 30 recall candidates, one short
+extra call per question, counted in `rerank_prompt_tokens`), `--qa-query-instruction`
+(Qwen3-Embedding's query instruction; the default asks for code that answers a question
+about a codebase, `none` keeps the model's web-search one), `--qa-summarizer heuristic`
+(docstring summaries, faster ingest), `--qa-codebase PATH --qa-questions FILE` for your
+own codebase and questions, `--database-url`.
 
 ## Useful flags
 
