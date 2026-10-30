@@ -121,6 +121,24 @@ def test_pack_respects_budget_and_upgrades_best_first() -> None:
     assert pack.pack(cands, 0) == {}
 
 
+def test_pack_depth_first_gives_leading_units_full_code() -> None:
+    big = _unit(id="big", signature="def big()", summary="Does the big thing.", tokens=400)
+    small = _unit(id="small", signature="def small()", summary="Small.", tokens=50)
+    # By value per token the knapsack would summarise "big" to afford "small" in full.
+    cands = {"big": pack.options(big, 0.9), "small": pack.options(small, 0.5)}
+    assert pack.pack(cands, 450)["big"].resolution is not Resolution.FULL
+
+    depth = pack.pack_depth_first(cands, 450, full_first=1)
+    assert depth["big"].resolution is Resolution.FULL
+    assert sum(o.tokens for o in depth.values()) <= 450
+    assert depth["small"].resolution is not Resolution.FULL  # what is left goes to the knapsack
+
+    # A leading unit whose full text cannot fit is packed smaller instead of skipped.
+    tight = pack.pack_depth_first(cands, 120, full_first=1)
+    assert tight["big"].resolution is not Resolution.FULL
+    assert pack.pack_depth_first(cands, 450, full_first=0) == pack.pack(cands, 450)
+
+
 def test_pack_skips_missing_resolutions() -> None:
     u = _unit(signature=None, summary=None)
     assert [o.resolution for o in pack.options(u, 1.0)] == [Resolution.FULL]
