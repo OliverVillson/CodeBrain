@@ -206,9 +206,9 @@ def get_units(conn: psycopg.Connection, unit_ids: Iterable[str]) -> dict[str, Un
         return {}
     with conn.cursor(row_factory=dict_row) as cur:
         rows = cur.execute(
-            f"SELECT {_UNIT_COLUMNS} FROM units WHERE id = ANY(%s)", (ids,)
+            f"SELECT {UNIT_COLUMNS} FROM units WHERE id = ANY(%s)", (ids,)
         ).fetchall()
-    return {u.id: u for u in map(_row_to_unit, rows)}
+    return {u.id: u for u in map(row_to_unit, rows)}
 
 
 def episodes_for(conn: psycopg.Connection, unit_id: str) -> list[Episode]:
