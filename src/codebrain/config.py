@@ -44,6 +44,12 @@ class GraphParams(BaseModel):
 
     ppr_beta: float = 0.5
     similar_to_threshold: float = 0.85
+    ppr_hops: int = 2
+    """How far from the seed hits edges are loaded for the walk."""
+    ppr_iterations: int = 50
+    ppr_tolerance: float = 1e-6
+    expand_keep: int = 20
+    """Graph neighbours (not found by any index) added to the candidates, by PageRank."""
 
 
 class RetrievalParams(BaseModel):
