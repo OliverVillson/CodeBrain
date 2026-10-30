@@ -122,21 +122,23 @@ def test_pack_respects_budget_and_upgrades_best_first() -> None:
 
 
 def test_pack_depth_first_gives_leading_units_full_code() -> None:
-    big = _unit(id="big", signature="def big()", summary="Does the big thing.", tokens=400)
-    small = _unit(id="small", signature="def small()", summary="Small.", tokens=50)
-    # By value per token the knapsack would summarise "big" to afford "small" in full.
+    big = _unit(id="big", text="x = 1\n" * 260, signature="def big()", summary="Big.", tokens=390)
+    small = _unit(id="small", text="y = 2\n" * 30, signature="def small()", summary="S.", tokens=45)
     cands = {"big": pack.options(big, 0.9), "small": pack.options(small, 0.5)}
-    assert pack.pack(cands, 450)["big"].resolution is not Resolution.FULL
+    full = {u: next(o.tokens for o in cands[u] if o.resolution is Resolution.FULL) for u in cands}
+    budget = full["big"] + full["small"] - 1
+    # By value per token the knapsack summarises "big" to afford "small" in full.
+    assert pack.pack(cands, budget)["big"].resolution is not Resolution.FULL
 
-    depth = pack.pack_depth_first(cands, 450, full_first=1)
+    depth = pack.pack_depth_first(cands, budget, full_first=1)
     assert depth["big"].resolution is Resolution.FULL
-    assert sum(o.tokens for o in depth.values()) <= 450
     assert depth["small"].resolution is not Resolution.FULL  # what is left goes to the knapsack
+    assert sum(o.tokens for o in depth.values()) <= budget
 
     # A leading unit whose full text cannot fit is packed smaller instead of skipped.
-    tight = pack.pack_depth_first(cands, 120, full_first=1)
+    tight = pack.pack_depth_first(cands, full["big"] - 1, full_first=1)
     assert tight["big"].resolution is not Resolution.FULL
-    assert pack.pack_depth_first(cands, 450, full_first=0) == pack.pack(cands, 450)
+    assert pack.pack_depth_first(cands, budget, full_first=0) == pack.pack(cands, budget)
 
 
 def test_pack_skips_missing_resolutions() -> None:
