@@ -63,9 +63,24 @@ def test_score_matches_sketch_formula() -> None:
         params=S.retrieval,
         paging=S.paging,
     )
-    expected = 0.35 * 0.76 + 0.15 * 0.72 + 0.15 * 0.55 + 0.10 * 0.60 + 0.15 * 0.8 + 0.10 * 1.0
-    assert b.score == pytest.approx(expected)
+    r = S.retrieval
+    total = r.w_semantic + r.w_code + r.w_lexical + r.w_graph + r.w_symbol + r.w_path
+    relevance = (0.35 * 0.76 + 0.15 * 0.72 + 0.15 * 0.55 + 0.10 * 0.60) / total
+    prior = (r.quality_floor + (1 - r.quality_floor) * 0.8) * 1.0  # fresh: F = 1
+    assert b.relevance == pytest.approx(relevance)
+    assert b.prior == pytest.approx(prior)
+    assert b.score == pytest.approx(prior * relevance)
     assert sum(b.contributions.values()) == pytest.approx(b.relevance)
+
+
+def test_priors_scale_relevance_instead_of_adding_to_it() -> None:
+    kw = dict(semantic=0.0, code=0.0, lexical=0.0, graph=0.0, now=NOW, params=S.retrieval)
+    # Irrelevant scores 0 however well used: the old additive priors gave it ~0.175.
+    assert score(_unit(retrieved_count=9, used_count=9), paging=S.paging, **kw).score == 0  # type: ignore[arg-type]
+    hit = dict(kw, semantic=0.8, lexical=1.0)
+    used = score(_unit(retrieved_count=9, used_count=9), paging=S.paging, **hit)  # type: ignore[arg-type]
+    unused = score(_unit(retrieved_count=9, used_count=0), paging=S.paging, **hit)  # type: ignore[arg-type]
+    assert 0 < unused.score < used.score <= used.relevance
 
 
 def test_validity_and_namespace_scale_the_score() -> None:
@@ -196,3 +211,139 @@ def test_lexical_query_splits_identifiers_and_drops_stopwords() -> None:
     ]
     assert lexical_query("the and of") is None
     assert lexical_query("rate limiter") == "rate | limiter"
+
+
+def test_identifiers_pick_out_code_names() -> None:
+    from codebrain.retrieval.search import identifier_words, identifiers
+
+    q = (
+        "About the rq package: If an RQ Retry has fewer intervals, which interval does "
+        "Retry.get_interval use? What are MAX_RETRIES, getUserById and `lease` for the API?"
+    )
+    assert identifiers(q) == ["Retry", "Retry.get_interval", "MAX_RETRIES", "getUserById", "lease"]
+    # Short acronyms and the word that starts a sentence are prose.
+    assert identifiers("What does the API do? Huey uses Redis.") == ["Redis"]
+    assert identifier_words(["TokenBucket.take", "MAX_RETRIES"]) == [
+        "token",
+        "bucket",
+        "take",
+        "max",
+        "retries",
+    ]
+
+
+def test_lexical_query_drops_common_terms_and_ands_the_rare_ones() -> None:
+    from codebrain.retrieval.search import TermStats, rare_query
+
+    stats = TermStats(units=100, df={"job": 90, "queue": 40, "retry": 10, "jitter": 2})
+    terms = lexical_terms("job queue retry jitter")
+    common = stats.common(terms, 0.2)
+    assert common == {"job", "queue"}
+    assert lexical_query("job queue retry jitter", drop=common) == "retry | jitter"
+    assert lexical_query("job queue", drop=common) == "job | queue"  # never empty
+    assert rare_query(terms, stats.df) == "jitter & retry"
+    assert rare_query(["jitter", "unseen"], stats.df) is None
+
+
+def _code_unit(uid: str, start: int, end: int, **kw: object) -> Unit:
+    text = "\n".join(f"line_{i} = {i}" for i in range(start, end + 1))
+    base: dict[str, object] = dict(
+        id=uid,
+        kind=UnitKind.FUNCTION,
+        path="m.py",
+        span=Span(start_line=start, end_line=end),
+        text=text,
+        summary=f"Summary of {uid}.",
+        signature=f"def {uid}()",
+        tokens=pack.estimate_tokens(text),
+        updated_at=NOW,
+    )
+    base.update(kw)
+    return Unit.model_validate(base)
+
+
+def test_contains_needs_the_outer_full_text() -> None:
+    cls = _code_unit("cls", 1, 40, kind=UnitKind.CLASS)
+    method = _code_unit("m", 5, 12, kind=UnitKind.METHOD)
+    assert pack.contains(cls, method) and not pack.contains(method, cls)
+    for label in ("skeleton", "truncated", "split", "body"):
+        assert not pack.contains(cls.model_copy(update={"labels": {label: True}}), method)
+    assert not pack.contains(cls.model_copy(update={"path": "other.py"}), method)
+
+
+def test_plan_skips_units_already_inside_a_full_pick() -> None:
+    cls = _code_unit("cls", 1, 40, kind=UnitKind.CLASS)
+    method = _code_unit("m", 5, 12, kind=UnitKind.METHOD)
+    other = _code_unit("other", 50, 60)
+    got = pack.plan([(cls, 1.0), (method, 0.9), (other, 0.5)], 10_000, full_first=3)
+    assert set(got) == {"cls", "other"}  # the method is shown inside its class
+    # The class after its method replaces it and gets its tokens back.
+    got = pack.plan([(method, 1.0), (cls, 0.9)], 10_000, full_first=2)
+    assert set(got) == {"cls"} and got["cls"].resolution is Resolution.FULL
+
+
+def test_plan_caps_full_code_and_lists_signatures_of_the_rest() -> None:
+    picks = [(_code_unit(f"u{i}", 100 * i + 1, 100 * i + 30), 1.0 - i / 100) for i in range(30)]
+    full = pack.options(picks[0][0], 1.0)[-1].tokens
+    budget = 4 * full
+    got = pack.plan(picks, budget, full_first=10, full_share=0.5, toc_share=0.25)
+    assert sum(o.tokens for o in got.values()) <= budget
+    by_res = [got[u.id].resolution for u, _ in picks if u.id in got]
+    assert by_res[:2] == [Resolution.FULL, Resolution.FULL]
+    assert by_res.count(Resolution.FULL) == 2  # 50% of the budget
+    assert by_res[-1] is Resolution.SIGNATURE  # the table of contents comes last
+    assert len(got) > 10
+
+
+def test_render_grouped_puts_each_file_under_one_heading() -> None:
+    a1 = _code_unit("a1", 30, 31, path="a.py", qualified_name="late")
+    a2 = _code_unit("a2", 1, 2, path="a.py", qualified_name="early")
+    b = _code_unit("b", 1, 2, path="b.py", qualified_name="bee")
+    text = pack.render_grouped(
+        [(a1, Resolution.FULL), (b, Resolution.SUMMARY), (a2, Resolution.SIGNATURE)]
+    )
+    assert text == (
+        "### a.py\n- 1-2: def a2()\n#### 30-31 late\nline_30 = 30\nline_31 = 31"
+        "\n\n### b.py\n#### 1-2 bee · summary\nSummary of b."
+    )
+
+
+def test_skeleton_elisions_collapse_and_code_has_no_kind_tag() -> None:
+    u = _unit(text="class A:\n    ...\n    ...\n    x = 1\n    ...", qualified_name="A")
+    assert pack.body(u, Resolution.FULL) == "class A:\n    ...\n    x = 1\n    ..."
+    assert pack.header(u) == "### a.py A"
+    ep = _unit(kind=UnitKind.EPISODE, path=None, id="e1", namespace=Namespace.PROJECT)
+    assert pack.header(ep) == "### e1 [episode]"
+
+
+def test_dampen_hubs_scales_big_containers() -> None:
+    from codebrain.retrieval.graph import GraphEdge, dampen_hubs
+
+    edges = [GraphEdge("mod", f"f{i}", EdgeType.CONTAINS) for i in range(80)]
+    edges.append(GraphEdge("f0", "f1", EdgeType.CALLS))
+    out = dampen_hubs(edges, hub_degree=40)
+    assert out[0].effective_weight == pytest.approx(0.5 * 40 / 80)
+    assert out[-1].effective_weight == 1.0
+    small = dampen_hubs(edges[:10], hub_degree=40)
+    assert all(e.effective_weight == 0.5 for e in small)
+
+
+def test_encode_query_embeds_once_per_model() -> None:
+    from codebrain.models import VectorView
+    from codebrain.retrieval.encoders import encode_query
+
+    calls: list[str] = []
+
+    class Enc:
+        def __init__(self, model: str) -> None:
+            self.model = model
+
+        def embed(self, texts: list[str]) -> list[list[float]]:
+            calls.append(self.model)
+            return [[1.0, 0.0]]
+
+    shared = Enc("m")
+    out = encode_query({VectorView.SUMMARY: shared, VectorView.CODE: Enc("m")}, "q")
+    assert calls == ["m"] and out[VectorView.SUMMARY][1] is out[VectorView.CODE][1]
+    encode_query({VectorView.SUMMARY: Enc("a"), VectorView.CODE: Enc("b")}, "q")
+    assert calls == ["m", "a", "b"]

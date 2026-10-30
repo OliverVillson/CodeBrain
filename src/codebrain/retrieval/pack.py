@@ -8,7 +8,12 @@ LP relaxation: per unit, keep the options on the upper convex hull of
 and take steps in order of value gained per token while they fit.
 
 ``pack_depth_first`` first gives the leading candidates their full text, in order,
-and runs the knapsack on the rest of the budget.
+and runs the knapsack on the rest of the budget. ``plan`` is what recall uses: the
+same depth-first phase, capped at a share of the budget and aware that a unit inside
+another unit's full text is already shown, then the knapsack, then one-line
+signatures of what is still left out, as a table of contents.
+
+``render_grouped`` lays the packed units out by file, one heading per file.
 """
 
 from __future__ import annotations
@@ -16,6 +21,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from itertools import groupby
 
 from codebrain.ingest.tokens import approx_tokens
 from codebrain.models import VALIDITY_CURRENT, Resolution, Unit
@@ -35,15 +41,29 @@ def citation(unit: Unit) -> str:
     return unit.id
 
 
+def _stale(unit: Unit) -> str:
+    if unit.labels.get("tombstoned"):
+        return " (deleted from the repo)"
+    if unit.validity < VALIDITY_CURRENT:
+        return " (changed since written)"
+    return ""
+
+
 def header(unit: Unit) -> str:
     name = f" {unit.qualified_name}" if unit.qualified_name else ""
-    if unit.labels.get("tombstoned"):
-        stale = " (deleted from the repo)"
-    elif unit.validity < VALIDITY_CURRENT:
-        stale = " (changed since written)"
-    else:
-        stale = ""
-    return f"### {citation(unit)}{name} [{unit.kind}]{stale}"
+    # Code shows what it is in its own text; experience units say what they are.
+    kind = "" if unit.kind.is_code else f" [{unit.kind}]"
+    return f"### {citation(unit)}{name}{kind}{_stale(unit)}"
+
+
+def _collapse_elisions(text: str) -> str:
+    """One ``...`` line for a run of them (skeletons elide each child separately)."""
+    out: list[str] = []
+    for line in text.split("\n"):
+        if line.strip() == "..." and out and out[-1].strip() == "...":
+            continue
+        out.append(line)
+    return "\n".join(out)
 
 
 def body(unit: Unit, resolution: Resolution) -> str | None:
@@ -52,7 +72,7 @@ def body(unit: Unit, resolution: Resolution) -> str | None:
         return unit.signature or None
     if resolution is Resolution.SUMMARY:
         return unit.summary or None
-    return unit.text
+    return _collapse_elisions(unit.text)
 
 
 def render(unit: Unit, resolution: Resolution) -> str:
@@ -78,13 +98,18 @@ class Option:
     value: float
 
 
-def options(unit: Unit, value: float) -> list[Option]:
-    """Every resolution the unit can be shown at, with ρ_r-scaled value."""
+def options(
+    unit: Unit, value: float, factors: Mapping[Resolution, float] | None = None
+) -> list[Option]:
+    """Every resolution the unit can be shown at, with ρ_r-scaled value.
+
+    ``factors`` overrides ``Resolution.value_factor`` for some resolutions."""
     out: list[Option] = []
     for r in Resolution:
         t = tokens_at(unit, r)
         if t is not None:
-            out.append(Option(r, t, value * r.value_factor))
+            rho = factors.get(r, r.value_factor) if factors else r.value_factor
+            out.append(Option(r, t, value * rho))
     return out
 
 
@@ -162,3 +187,127 @@ def pack_depth_first(
     rest = {uid: opts for uid, opts in candidates.items() if uid not in chosen}
     chosen.update(pack(rest, budget - used))
     return chosen
+
+
+_PARTIAL_TEXT = ("skeleton", "truncated", "split", "body")
+"""Labels of units whose text does not include their children's text."""
+
+
+def contains(outer: Unit, inner: Unit) -> bool:
+    """``inner``'s code is part of ``outer``'s full text (a method inside its class)."""
+    if (
+        outer.id == inner.id
+        or not outer.kind.is_code
+        or outer.path is None
+        or outer.path != inner.path
+        or outer.span is None
+        or inner.span is None
+        or any(outer.labels.get(k) for k in _PARTIAL_TEXT)
+    ):
+        return False
+    return (
+        outer.span.start_line <= inner.span.start_line
+        and inner.span.end_line <= outer.span.end_line
+        and (outer.span != inner.span or outer.tokens > inner.tokens)
+    )
+
+
+def plan(
+    picks: Sequence[tuple[Unit, float]],
+    budget: int,
+    *,
+    full_first: int,
+    full_share: float = 1.0,
+    toc_share: float = 0.0,
+    factors: Mapping[Resolution, float] | None = None,
+) -> dict[str, Option]:
+    """Pack ranked ``(unit, value)`` picks into ``budget`` tokens.
+
+    1. Depth first: each of the first ``full_first`` picks gets its full text while the
+       full texts fit in ``full_share`` of the budget. A pick inside an already chosen
+       full text is skipped (it is shown already); a pick whose full text holds already
+       chosen picks replaces them.
+    2. The knapsack spends the rest, less ``toc_share`` of the budget.
+    3. Picks still left out get their signature, in rank order, while it fits: a table
+       of contents of what else exists.
+    """
+    units = {u.id: u for u, _ in picks}
+    opts = {u.id: options(u, v, factors) for u, v in picks}
+    chosen: dict[str, Option] = {}
+    covered: set[str] = set()
+    used = 0
+    cap = int(budget * full_share)
+    tried = 0
+    for u, _ in picks:
+        if tried >= full_first:
+            break
+        if u.id in covered:
+            continue
+        tried += 1
+        full = next((o for o in opts[u.id] if o.resolution is Resolution.FULL), None)
+        if full is None:
+            continue
+        inside = [c for c in chosen if contains(u, units[c])]
+        refund = sum(chosen[c].tokens for c in inside)
+        if used - refund + full.tokens > cap:
+            continue
+        for c in inside:
+            del chosen[c]
+        used += full.tokens - refund
+        chosen[u.id] = full
+        covered |= {o for o in units if contains(u, units[o])}
+
+    reserve = int(budget * toc_share)
+    rest = {uid: o for uid, o in opts.items() if uid not in chosen and uid not in covered}
+    chosen.update(pack(rest, max(0, budget - used - reserve)))
+    used = sum(o.tokens for o in chosen.values())
+
+    for u, _ in picks:
+        if u.id in chosen or u.id in covered:
+            continue
+        sig = next((o for o in opts[u.id] if o.resolution is Resolution.SIGNATURE), None)
+        if sig is not None and used + sig.tokens <= budget:
+            chosen[u.id] = sig
+            used += sig.tokens
+    return chosen
+
+
+def _lines(unit: Unit) -> str:
+    if unit.span is None:
+        return ""
+    s, e = unit.span.start_line, unit.span.end_line
+    return f"{s}" if s == e else f"{s}-{e}"
+
+
+def render_grouped(blocks: Sequence[tuple[Unit, Resolution]]) -> str:
+    """The packed units as one context block, grouped by file.
+
+    Files come in the order of their best-ranked unit (``blocks`` is in rank order) and
+    each file's units in line order under one ``### path`` heading. Signatures are one
+    line each. Units without a path (episodes, decisions) keep their own block.
+    """
+    first: dict[str, int] = {}
+    for i, (u, _) in enumerate(blocks):
+        first.setdefault(u.path or u.id, i)
+
+    def file_key(b: tuple[Unit, Resolution]) -> tuple[int, int]:
+        u = b[0]
+        return first[u.path or u.id], u.span.start_line if u.span else 0
+
+    out: list[str] = []
+    for _, group in groupby(sorted(blocks, key=file_key), key=lambda b: file_key(b)[0]):
+        items = list(group)
+        unit0 = items[0][0]
+        if unit0.path is None:
+            out.extend(render(u, r) for u, r in items)
+            continue
+        parts = [f"### {unit0.path}"]
+        for u, r in items:
+            name = f" {u.qualified_name}" if u.qualified_name and u.qualified_name != u.path else ""
+            if r is Resolution.SIGNATURE:
+                parts.append(f"- {_lines(u)}: {u.signature}{_stale(u)}")
+                continue
+            tag = " · summary" if r is Resolution.SUMMARY else ""
+            parts.append(f"#### {_lines(u)}{name}{tag}{_stale(u)}\n{body(u, r)}")
+        out.append("\n".join(parts))
+    return "\n\n".join(out)

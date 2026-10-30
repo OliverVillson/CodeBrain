@@ -50,12 +50,15 @@ def test_edge_default_weights() -> None:
 
 def test_resolution_value() -> None:
     assert [r.value_factor for r in Resolution] == [0.4, 0.7, 1.0]
+    # Recall packs with the tuned factors, which favour code over prose.
+    r = Settings().retrieval
+    assert (r.value_signature, r.value_summary) == (0.15, 0.35)
 
 
 def test_settings_defaults_match_sketch() -> None:
     s = Settings()
     w = s.retrieval
-    total = w.w_semantic + w.w_code + w.w_lexical + w.w_graph + w.w_quality + w.w_freshness
-    assert total == pytest.approx(1.0)
+    assert w.w_semantic + w.w_code + w.w_lexical + w.w_graph == pytest.approx(0.75)
+    assert 0 < w.quality_floor < 1 and 0 < w.freshness_floor < 1
     assert (s.chunking.tau_min, s.chunking.tau_max) == (64, 1200)
     assert s.paging.high_water == 0.70

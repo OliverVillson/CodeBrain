@@ -84,6 +84,16 @@ class GraphParams(BaseModel):
     """Neighbours are loaded in PageRank order, ``expand_load_factor * expand_keep`` at a
     time, until ``expand_keep`` pass the filters; the 2-hop neighbourhood can be most of
     the repo, so loading all of it (with vectors) is the main cost of a recall."""
+    ppr_seeds: int = 10
+    """Only the best fused hits seed the walk; seeding all ``fused_keep`` spread the mass
+    over most of the repo."""
+    hub_degree: int = 40
+    """Units with more edges than this (a big module's ``contains`` fan-out) are not
+    walked through on later hops, and their ``contains`` edges are down-weighted to
+    ``hub_degree / degree`` of their weight, so a file is not a highway to all its
+    siblings."""
+    max_nodes: int = 2000
+    """Stop loading more hops once the neighbourhood has this many units."""
 
 
 class RetrievalParams(BaseModel):
@@ -96,19 +106,48 @@ class RetrievalParams(BaseModel):
     w_code: float = 0.15
     w_lexical: float = 0.15
     w_graph: float = 0.10
-    w_quality: float = 0.15
-    w_freshness: float = 0.10
+    w_symbol: float = 0.25
+    """Exact identifier matches (a name in the query that a unit defines or uses)."""
+    w_path: float = 0.10
+    """The query names a directory on the unit's path (1) or its file's stem (0.5):
+    "in the billing package", "the webhooks module"."""
+    quality_floor: float = 0.5
+    """Q(u) and F(u) scale relevance instead of adding to it: S is multiplied by
+    ``floor + (1 - floor) * prior``. Added, they gave every candidate about 0.175 for
+    free against top scores near 0.45, so weak hits were never far behind."""
+    freshness_floor: float = 0.8
     freshness_half_life_days: float = 30.0
     mmr_mu: float = 0.7
+    mmr_same_file: float = 0.0
+    """MMR redundancy between two units of one file that do not contain each other. A
+    unit inside another unit's full text is fully redundant (1.0)."""
     cross_encoder_top: int = 30
+    """How many of the top candidates an optional reranker sees."""
+    rerank_boost: float = 1.0
+    """Added to the relevance of each unit the reranker picks."""
     full_first: int = 10
     """Depth first: the top MMR picks are packed as full code, in order, before the
     knapsack spends what is left. Partial context (a summary where the code was needed)
     cost most answers on the codebase Q&A benchmark. 0 turns it off."""
+    full_share: float = 0.75
+    """Share of the budget the full-code picks may use; the rest buys breadth."""
+    toc_share: float = 0.08
+    """Share of the budget kept back for one-line signatures of the picks that did not
+    fit otherwise, so the model knows which names exist."""
     min_relative_score: float = 0.5
-    """Below the full-code picks, drop units scoring under this fraction of the best
-    score, so weak hits stop padding big budgets (the Q and F priors put a floor of
-    about 0.175 under every candidate)."""
+    """Drop candidates scoring under this fraction of the best score before MMR and
+    packing, so weak hits stop padding big budgets."""
+    value_signature: float = 0.15
+    value_summary: float = 0.35
+    """Packing value of a unit's signature and summary relative to its full code. The
+    old 0.4 / 0.7 bought ~60 summaries before any code, and prose rarely holds the
+    constant or condition a question asks about."""
+    lexical_max_df: float = 0.2
+    """Query terms in more than this share of the searched units are dropped from the
+    lexical query (``job`` and ``queue`` in a job-queue repo)."""
+    expand_identifiers: bool = True
+    """Append the split parts of identifiers in the query (``TokenBucket`` -> token
+    bucket) to the text embedded for the dense views."""
 
     @property
     def freshness_lambda(self) -> float:

@@ -7,6 +7,7 @@ an unrelated retry helper, and middleware that only the code graph connects.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
 import psycopg
@@ -43,7 +44,8 @@ def _code(uid: str, path: str, name: str, summary: str, terms: str, **kw: object
         qualified_name=name,
         language="python",
         span=Span(start_line=10, end_line=24),
-        text=f"def {name.split('.')[-1]}(...):\n" + "    ...\n" * 40,
+        text=f"def {name.split('.')[-1]}(...):\n"
+        + "".join(f"    step_{i} = run(step_{i - 1})\n" for i in range(1, 30)),
         summary=summary,
         signature=f"def {name.split('.')[-1]}(...)",
         lexical_terms=terms,
@@ -159,9 +161,17 @@ def corpus(conn: psycopg.Connection) -> dict[str, Unit]:
     return units
 
 
+def _settings() -> Settings:
+    """Defaults, but keep weak hits: most tests look at where every unit ranks, and in a
+    six-unit corpus the relative cutoff leaves little more than the top hit."""
+    settings = Settings()
+    settings.retrieval.min_relative_score = 0.0
+    return settings
+
+
 def _broker(conn: psycopg.Connection, settings: Settings | None = None) -> ContextBroker:
     encoders = {VectorView.SUMMARY: TEXT, VectorView.CODE: CODE}
-    return ContextBroker(conn, encoders, settings=settings or Settings(), clock=lambda: NOW)
+    return ContextBroker(conn, encoders, settings=settings or _settings(), clock=lambda: NOW)
 
 
 @pytest.mark.db
@@ -176,7 +186,20 @@ def test_recall_ranks_live_code_over_tombstoned_episode(
     assert top.citation == "ratelimit/bucket.py:10-24"
     assert top.text.startswith("### ratelimit/bucket.py:10-24 TokenBucket.consume")
     assert result.tokens_used <= result.budget
-    assert "### ratelimit/bucket.py:10-24" in result.render()
+    # The context groups units under one heading per file.
+    assert result.render().startswith("### ratelimit/bucket.py\n#### 10-24 TokenBucket.consume\n")
+
+
+@pytest.mark.db
+def test_relative_cutoff_drops_weak_hits(conn: psycopg.Connection, corpus: dict[str, Unit]) -> None:
+    settings = _settings()
+    settings.retrieval.min_relative_score = 0.5
+    result = _broker(conn, settings).recall(QUERY, 10_000, log=False)
+    kept = {u.unit.id for u in result.units}
+    everything = {u.unit.id for u in _broker(conn).recall(QUERY, 10_000, log=False).units}
+    assert "bucket" in kept and kept < everything
+    best = result.units[0].score
+    assert all(u.score >= 0.5 * best for u in result.units)
 
 
 @pytest.mark.db
@@ -187,7 +210,7 @@ def test_explain_breaks_down_validity(conn: psycopg.Connection, corpus: dict[str
     assert b is not None
     assert set(ex.index_ranks) == {"semantic", "code", "lexical"}
     assert b.validity == pytest.approx(0.3)
-    assert b.score == pytest.approx(0.3 * b.relevance)
+    assert b.score == pytest.approx(0.3 * b.prior * b.relevance)
     assert b.semantic > 0.5  # semantically the closest unit, pulled down by validity
     assert sum(b.contributions.values()) == pytest.approx(b.relevance)
 
@@ -285,12 +308,13 @@ def test_recall_logs_retrievals(conn: psycopg.Connection, corpus: dict[str, Unit
 def test_explain_scores_units_outside_the_candidates(
     conn: psycopg.Connection, corpus: dict[str, Unit]
 ) -> None:
-    settings = Settings()
+    settings = _settings()
     settings.retrieval.k_per_index = 1
     settings.graph.expand_keep = 0
     ex = _broker(conn, settings).explain(QUERY, "config", budget=10_000)
     assert ex.found and not ex.candidate and ex.index_ranks == {}
-    assert ex.breakdown is not None and ex.breakdown.score > 0
+    # Nothing in it matches the query, so only the priors are non-zero.
+    assert ex.breakdown is not None and ex.breakdown.prior > 0 and ex.breakdown.score == 0
     assert ex.selected is False
     missing = _broker(conn).explain(QUERY, "no-such-unit")
     assert not missing.found and missing.breakdown is None
@@ -348,10 +372,80 @@ def test_graph_expansion_loads_a_bounded_prefix(
         return real(*args, **kw)  # type: ignore[arg-type]
 
     monkeypatch.setattr(broker_mod.search, "load_candidates", counting)
-    settings = Settings()
+    settings = _settings()
     settings.graph.expand_keep = 5
     settings.graph.expand_load_factor = 2
     result = _broker(conn, settings).recall(QUERY, 10_000, log=False)
     assert result.units
     # Seeds, then one batch of 2 * 5 neighbours was enough to fill the 5 slots.
     assert loaded[1:] == [10]
+
+
+@pytest.mark.db
+def test_symbol_hits_rank_definitions_over_mentions(conn: psycopg.Connection) -> None:
+    from codebrain.retrieval import search
+
+    defs = _store(conn, _code("defs", "q/defaults.py", "q/defaults.py", "Defaults.", "defaults"))
+    repo.upsert_unit(conn, defs.model_copy(update={"text": "MAX_RETRIES = 7\nOTHER = 1\n"}))
+    _store(conn, _code("use", "q/worker.py", "Worker.run", "Runs jobs.", "worker run"))
+    use = repo.get_unit(conn, "use")
+    assert use is not None
+    repo.upsert_unit(conn, use.model_copy(update={"text": "def run():\n    n = MAX_RETRIES\n"}))
+    _store(conn, _code("bucket", "rl/bucket.py", "TokenBucket.consume", "Bucket.", "token bucket"))
+
+    hits = search.symbol_hits(conn, ["MAX_RETRIES", "TokenBucket.consume"], Filters(), 10)
+    ids = [uid for uid, _ in hits]
+    assert ids[0] == "bucket"  # defined by name, and the only unit matching it
+    assert ids.index("defs") < ids.index("use")  # assigned beats mentioned
+    assert search.symbol_hits(conn, ["MAX_RETRIES"], Filters(repo="nope"), 10) == []
+
+
+@pytest.mark.db
+def test_recall_reports_stage_timings_and_symbol_matches(
+    conn: psycopg.Connection, corpus: dict[str, Unit]
+) -> None:
+    result = _broker(conn).recall("Where is TokenBucket.consume?", 10_000, log=False)
+    assert result.units[0].unit.id == "bucket"
+    assert result.units[0].breakdown.symbol == pytest.approx(1.0)
+    assert {"embed", "search_lexical", "search_symbol", "graph", "load", "score", "pack"} <= set(
+        result.timings
+    )
+    assert all(v >= 0 for v in result.timings.values())
+
+
+@pytest.mark.db
+def test_term_stats_follow_the_repo(conn: psycopg.Connection, corpus: dict[str, Unit]) -> None:
+    from codebrain.retrieval import search
+
+    stats = search.term_stats(conn, "demo")
+    assert stats.units == 6
+    assert stats.df["bucket"] >= 1 and "nonexistentterm" not in stats.df
+    broker = _broker(conn)
+    broker.recall(QUERY, 1000, log=False)
+    version = search.stats_version(conn, None)
+    _store(conn, _code("new", "n.py", "n", "Rate limit.", "rate limit", repo="demo"))
+    assert search.stats_version(conn, None) != version
+    assert search.term_stats(conn, "demo").units == 7
+
+
+@pytest.mark.db
+def test_reranker_boosts_its_picks(conn: psycopg.Connection, corpus: dict[str, Unit]) -> None:
+    seen: list[list[str]] = []
+
+    class PickLast:
+        """Picks the weakest candidate it is shown."""
+
+        def rerank(self, query: str, candidates: Sequence[tuple[str, str]]) -> list[str]:
+            seen.append([uid for uid, _ in candidates])
+            assert all(text.startswith("### ") for _, text in candidates)
+            return [candidates[-1][0]]
+
+    settings = _settings()
+    settings.retrieval.cross_encoder_top = 3
+    encoders = {VectorView.SUMMARY: TEXT, VectorView.CODE: CODE}
+    broker = ContextBroker(
+        conn, encoders, settings=settings, clock=lambda: NOW, reranker=PickLast()
+    )
+    result = broker.recall(QUERY, 10_000, log=False)
+    assert len(seen) == 1 and len(seen[0]) == 3
+    assert result.units[0].unit.id == seen[0][-1] != "bucket"
