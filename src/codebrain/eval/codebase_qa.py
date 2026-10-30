@@ -22,6 +22,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
+import subprocess
 import time
 import uuid
 from collections.abc import Callable, Sequence
@@ -100,6 +102,72 @@ def codebase_files(root: Path) -> list[tuple[str, str]]:
         except (OSError, UnicodeDecodeError):
             continue
     return out
+
+
+DEFAULT_HAYSTACK = (
+    # Real job-queue libraries, pinned, mixed in as unrelated code next to the fixture.
+    # Same domain on purpose: their retries, backoff and rate limits are look-alikes.
+    "https://github.com/rq/rq@1cf2c3eab33a8eda95c6107720dc40c7e285dd2b",
+    "https://github.com/coleifer/huey@448db31be8c757c7c633c9afad5b5662acc7dd9c",
+    "https://github.com/python-arq/arq@5ee4b48cf6faf4dc181f1ccb76dfb1bc1fedf9bf",
+)
+
+_HAYSTACK_SKIP = ("tests/", "test/", "docs/", "examples/", "benchmarks/")
+
+
+def checkout(spec: str, cache: Path) -> tuple[str, Path]:
+    """Clone ``URL@REF`` once into ``cache`` and check out ``REF``. Returns (name, path)."""
+    url, _, ref = spec.rpartition("@") if "@" in spec.split("/")[-1] else (spec, "", "")
+    name = url.rstrip("/").removesuffix(".git").split("/")[-1]
+    dest = cache / f"{name}@{ref or 'HEAD'}"
+    if not dest.exists():
+        log.info("cloning %s", spec)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_suffix(".tmp")
+        subprocess.run(["rm", "-rf", str(tmp)], check=True)
+        subprocess.run(["git", "clone", "--quiet", "--filter=blob:none", url, str(tmp)], check=True)
+        if ref:
+            subprocess.run(["git", "-C", str(tmp), "checkout", "--quiet", ref], check=True)
+        tmp.rename(dest)
+    return name, dest
+
+
+def build_haystack_codebase(
+    root: Path,
+    haystack: Sequence[str],
+    cache: Path,
+    max_tokens: int,
+    count_tokens: Callable[[str], int],
+    dest: Path,
+) -> Path:
+    """Copy ``root`` to ``dest`` and add library code from ``haystack`` under ``libs/``.
+
+    (Not ``vendor/``: ingest skips that.)
+
+    Files are taken round-robin across the repos (sorted by path within each) until the
+    added code reaches ``max_tokens``, so every repo contributes. Tests, docs and
+    examples are left out.
+    """
+    shutil.rmtree(dest, ignore_errors=True)
+    shutil.copytree(root, dest, ignore=shutil.ignore_patterns("__pycache__"))
+    queues = []
+    for spec in haystack:
+        name, path = checkout(spec, cache)
+        files = [
+            (f"libs/{name}/{rel}", text)
+            for rel, text in codebase_files(path)
+            if rel.endswith(".py") and not rel.startswith(_HAYSTACK_SKIP) and "/tests/" not in rel
+        ]
+        queues.append(files)
+    used = 0
+    while used < max_tokens and any(queues):
+        for q in queues:
+            if q and used < max_tokens:
+                rel, text = q.pop(0)
+                (dest / rel).parent.mkdir(parents=True, exist_ok=True)
+                (dest / rel).write_text(text)
+                used += count_tokens(text)
+    return dest
 
 
 def render_codebase(files: Sequence[tuple[str, str]]) -> str:

@@ -245,6 +245,20 @@ def check_database(url: str) -> None:
 async def cmd_qa(args: argparse.Namespace, out: Path, llm: LLM) -> dict[str, Any]:
     root = Path(args.qa_codebase).expanduser().resolve()
     questions = qa.load_questions(Path(args.qa_questions).expanduser())
+    if args.qa_haystack:
+        # Other libraries now share the tree, so say which package the question is about.
+        questions = [
+            dataclasses.replace(q, question=f"About the {root.name} package: {q.question}")
+            for q in questions
+        ]
+        root = qa.build_haystack_codebase(
+            root,
+            args.qa_haystack,
+            Path(args.cache).expanduser(),
+            args.qa_haystack_tokens,
+            llm.count_tokens,
+            out / f"codebase-{root.name}-haystack",
+        )
     files = qa.codebase_files(root)
     codebase = qa.render_codebase(files)
     codebase_tokens = llm.count_tokens(codebase)
@@ -439,6 +453,14 @@ def parser() -> argparse.ArgumentParser:
     g.add_argument("--qa-questions", default=str(qa.DEFAULT_QUESTIONS))
     g.add_argument("--qa-budget", type=int, default=4_000, help="recall token budget")
     g.add_argument("--qa-k", type=int, default=None, help="pack only the top k recall results")
+    g.add_argument(
+        "--qa-haystack",
+        action="append",
+        default=[],
+        metavar="URL@REF",
+        help="add this repo's code under libs/ (repeatable; 'default' = rq, huey, arq)",
+    )
+    g.add_argument("--qa-haystack-tokens", type=int, default=130_000, help="cap on added code")
     g.add_argument("--qa-max-tokens", type=int, default=600, help="answer length cap")
     g.add_argument("--qa-summarizer", choices=["llm", "heuristic"], default="llm")
     g.add_argument("--qa-warm-cache", action="store_true", help="let the prefix cache be reused")
@@ -451,6 +473,8 @@ async def amain(args: argparse.Namespace) -> int:
     args.embed_model = args.embed_model or DEFAULT_EMBED
     if args.command in ("retrieval", "paging", "all") and not args.repo:
         raise SystemExit(f"{args.command} needs at least one --repo")
+    if args.qa_haystack == ["default"]:
+        args.qa_haystack = list(qa.DEFAULT_HAYSTACK)
     if args.command in ("qa", "all"):
         args.database_url = args.database_url or get_settings().database_url
         check_database(args.database_url)
